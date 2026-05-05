@@ -2,7 +2,7 @@
 """
 Folio-OCR CLI — batch subcommand with rich live progress.
 
-Interactive path input + real-time progress display.
+Interactive path input + real-time per-page text output + retry.
 """
 import asyncio
 import json
@@ -13,8 +13,6 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Optional
-
-import sys
 
 from rich.console import Console
 from rich.live import Live
@@ -43,6 +41,25 @@ console = Console(force_terminal=True)
 ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".avif", ".jxl"}
 PDF_EXT = ".pdf"
+
+# --- Retry helper ---
+
+async def _ocr_with_retry(coro_fn, *args, max_retries: int = 3, base_delay: float = 2.0, **kwargs):
+    """Call an async OCR function with retry on 5xx / connection errors."""
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await coro_fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            # Only retry on 5xx / connection errors
+            is_retryable = "500" in err_str or "502" in err_str or "503" in err_str or "ConnectError" in err_str or "ConnectionReset" in err_str
+            if not is_retryable or attempt == max_retries:
+                raise
+            delay = base_delay * attempt
+            logger.warning(f"[batch] Retry {attempt}/{max_retries} after error: {err_str[:80]}... (wait {delay:.0f}s)")
+            await asyncio.sleep(delay)
 
 
 # --- Fingerprinting ---
@@ -100,7 +117,7 @@ def extract_archive(archive_path: Path, tmp_dir: Path) -> list[Path]:
         else:
             return []
     except Exception as e:
-        console.print(f"[red]Extract failed: {e}[/]")
+        logger.warning(f"Extract failed: {e}")
         return []
 
     found = []
@@ -146,35 +163,36 @@ def collect_files(input_dir: Path, ext_filter: set[str], include_images: bool,
     return files, skipped
 
 
-# --- OCR processing ---
+# --- OCR processing (page-by-page generator) ---
 
-async def process_document(source_path: Path, use_layout: bool = True) -> dict:
+async def process_document_pages(source_path: Path, use_layout: bool = True):
+    """Yield (event_type, data) for each page processed.
+    
+    Events:
+      ("page", {page_num, source, text, regions, time, error})
+      ("done", {source, file_hash, file_size, type, total_chars, total_time, error, pages})
+    """
     t0 = time.time()
     file_hash = file_fingerprint(source_path)
-    result = {
-        "source": str(source_path),
-        "file_hash": file_hash,
-        "file_size": source_path.stat().st_size,
-        "type": "",
-        "pages": [],
-        "total_time": 0,
-        "total_chars": 0,
-        "error": None,
-    }
-
     suffix = source_path.suffix.lower()
     page_images: list[Path] = []
     tmp_dirs: list[Path] = []
+    doc_type = ""
+    doc_error = None
 
     try:
         if suffix in ARCHIVE_EXTS:
-            result["type"] = "archive"
+            doc_type = "archive"
             tmp = Path(tempfile.mkdtemp(prefix="folio_batch_"))
             tmp_dirs.append(tmp)
             extracted = extract_archive(source_path, tmp)
             if not extracted:
-                result["error"] = "No images/PDFs found in archive"
-                return result
+                doc_error = "No images/PDFs found in archive"
+                yield ("done", {"source": str(source_path), "file_hash": file_hash,
+                                "file_size": source_path.stat().st_size, "type": doc_type,
+                                "total_chars": 0, "total_time": round(time.time() - t0, 2),
+                                "error": doc_error, "pages": []})
+                return
             image_files = sorted([f for f in extracted if f.suffix.lower() in IMAGE_EXTS], key=lambda p: p.name)
             pdf_files = [f for f in extracted if f.suffix.lower() == PDF_EXT]
             for pdf_f in pdf_files:
@@ -184,54 +202,68 @@ async def process_document(source_path: Path, use_layout: bool = True) -> dict:
             page_images.extend(image_files)
 
         elif suffix == PDF_EXT:
-            result["type"] = "pdf"
+            doc_type = "pdf"
             tmp = Path(tempfile.mkdtemp(prefix="folio_batch_"))
             tmp_dirs.append(tmp)
             page_images = pdf_to_page_images(source_path, tmp)
 
         elif suffix in IMAGE_EXTS:
-            result["type"] = "image"
+            doc_type = "image"
             page_images = [source_path]
         else:
-            result["error"] = f"Unsupported: {suffix}"
-            return result
+            doc_error = f"Unsupported: {suffix}"
+            yield ("done", {"source": str(source_path), "file_hash": file_hash,
+                            "file_size": source_path.stat().st_size, "type": doc_type,
+                            "total_chars": 0, "total_time": round(time.time() - t0, 2),
+                            "error": doc_error, "pages": []})
+            return
 
         if not page_images:
-            result["error"] = "No page images found"
-            return result
+            doc_error = "No page images found"
+            yield ("done", {"source": str(source_path), "file_hash": file_hash,
+                            "file_size": source_path.stat().st_size, "type": doc_type,
+                            "total_chars": 0, "total_time": round(time.time() - t0, 2),
+                            "error": doc_error, "pages": []})
+            return
 
+        pages = []
         for i, img_path in enumerate(page_images):
+            t1 = time.time()
+            page_data = {"page": i + 1, "source": img_path.name, "text": "", "regions": [], "time": 0, "error": None}
             try:
-                t1 = time.time()
                 if use_layout:
-                    text, regions = await ocr_image_with_layout(str(img_path), merge=True)
+                    text, regions = await _ocr_with_retry(ocr_image_with_layout, str(img_path), merge=True)
                 else:
-                    from PIL import Image
-                    img = Image.open(str(img_path)).convert("RGB")
-                    text = await ocr_whole_image(img)
+                    from PIL import Image as PILImage
+                    img = PILImage.open(str(img_path)).convert("RGB")
+                    text = await _ocr_with_retry(ocr_whole_image, img)
                     img.close()
                     regions = []
-                result["pages"].append({
-                    "page": i + 1,
-                    "source": img_path.name,
-                    "text": text,
-                    "regions": regions if use_layout else [],
-                    "time": round(time.time() - t1, 2),
-                })
+                page_data["text"] = text
+                page_data["regions"] = regions if use_layout else []
+                page_data["time"] = round(time.time() - t1, 2)
             except Exception as e:
-                result["pages"].append({"page": i + 1, "source": img_path.name, "text": "", "regions": [], "time": 0, "error": str(e)})
+                page_data["error"] = str(e)
+                logger.warning(f"[batch] Page {i+1} error: {e}")
 
-        result["total_chars"] = sum(len(p.get("text", "")) for p in result["pages"])
-        result["total_time"] = round(time.time() - t0, 2)
+            pages.append(page_data)
+            yield ("page", page_data)
+
+        total_chars = sum(len(p.get("text", "")) for p in pages)
+        yield ("done", {"source": str(source_path), "file_hash": file_hash,
+                        "file_size": source_path.stat().st_size, "type": doc_type,
+                        "total_chars": total_chars, "total_time": round(time.time() - t0, 2),
+                        "error": None, "pages": pages})
 
     except Exception as e:
-        result["error"] = str(e)
+        yield ("done", {"source": str(source_path), "file_hash": file_hash,
+                        "file_size": source_path.stat().st_size, "type": doc_type,
+                        "total_chars": 0, "total_time": round(time.time() - t0, 2),
+                        "error": str(e), "pages": []})
     finally:
         for td in tmp_dirs:
             if td.exists():
                 shutil.rmtree(td, ignore_errors=True)
-
-    return result
 
 
 # --- File preview table ---
@@ -246,7 +278,6 @@ def show_file_preview(input_dir: Path, ext_filter: set[str], include_images: boo
             console.print(f"[yellow]No matching files found.[/] [dim]({skipped} skipped by blacklist)[/]")
         else:
             console.print("[yellow]No matching files found.[/]")
-        return []
         return []
 
     # Determine which are already processed
@@ -286,17 +317,17 @@ def show_file_preview(input_dir: Path, ext_filter: set[str], include_images: boo
     return todo
 
 
-# --- Text preview helper ---
+# --- Text display helper ---
 
-def _text_preview(result: dict, max_len: int = 40) -> str:
-    """Extract a short text preview from an OCR result."""
-    text = ""
-    for page in result.get("pages", []):
-        text += page.get("text", "")
+def _truncate_text(text: str, max_len: int = 120) -> str:
+    """Truncate text for display, collapsing whitespace."""
     text = text.strip().replace("\n", " ")
+    # Collapse multiple spaces
+    import re
+    text = re.sub(r"  +", " ", text)
     if len(text) > max_len:
         return text[:max_len] + "..."
-    return text if text else ""
+    return text
 
 
 # --- Main batch command ---
@@ -308,7 +339,7 @@ async def _run_batch(
     concurrency: int,
     existing_results: list[dict],
 ):
-    """Core batch processing with Rich live progress."""
+    """Core batch processing with Rich live progress + per-page text output."""
     import httpx
     from app.ocr import engine as ocr_engine
     ocr_engine.http_client = httpx.AsyncClient(timeout=300.0)
@@ -335,7 +366,7 @@ async def _run_batch(
         return False
     console.print(f"[green]✓ Ollama ready, model: {OLLAMA_MODEL}[/]")
 
-    # --- Rich progress ---
+    # --- Rich layout: progress bar on top, text log below ---
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[bold blue]{task.description}"),
@@ -348,25 +379,64 @@ async def _run_batch(
         console=console,
     )
     task_id = progress.add_task("OCR", total=len(todo))
+
     results = list(existing_results)
     total_chars = 0
     total_errors = 0
     semaphore = asyncio.Semaphore(concurrency)
 
+    # Text log lines (shown below progress bar)
+    text_lines: list[str] = []
+
+    def _build_display() -> Panel:
+        """Build the full live display: progress + recent text."""
+        # Show last 8 text lines
+        recent = text_lines[-8:] if text_lines else []
+        body = progress.get_renderable()
+        if recent:
+            lines_text = "\n".join(recent)
+            from rich.columns import Columns
+            from rich.console import Group
+            group = Group(body, Text(""), Text(lines_text))
+            return Panel(group, title="[bold]Batch OCR[/]", border_style="cyan", height=18)
+        return Panel(body, title="[bold]Batch OCR[/]", border_style="cyan")
+
     async def _process_one(f: Path):
         nonlocal total_chars, total_errors
         async with semaphore:
-            result = await process_document(f, use_layout=use_layout)
-            results.append(result)
-            chars = result.get("total_chars", 0)
-            if result.get("error"):
+            progress.update(task_id, description=f.name)
+            result_dict = None
+            async for event_type, data in process_document_pages(f, use_layout=use_layout):
+                if event_type == "page":
+                    pg = data
+                    pg_num = pg.get("page", "?")
+                    pg_src = pg.get("source", "?")
+                    pg_text = pg.get("text", "")
+                    pg_err = pg.get("error")
+                    chars = len(pg_text)
+                    if pg_err:
+                        line = f"  [dim]p{pg_num}[/] [red]✗ {pg_err[:50]}[/]"
+                    elif chars == 0:
+                        line = f"  [dim]p{pg_num} {pg_src} — (empty)[/]"
+                    else:
+                        preview = _truncate_text(pg_text, 100)
+                        line = f"  [dim]p{pg_num}[/] [green]{chars}c[/] {preview}"
+                    text_lines.append(line)
+                elif event_type == "done":
+                    result_dict = data
+            # Finalize
+            if result_dict is None:
+                result_dict = {"source": str(f), "error": "no result", "pages": [], "total_chars": 0}
+
+            results.append(result_dict)
+            if result_dict.get("error"):
                 total_errors += 1
                 progress.update(task_id, advance=1, description=f"[red]✗[/] {f.name}")
             else:
+                chars = result_dict.get("total_chars", 0)
                 total_chars += chars
-                # Show brief text preview
-                preview = _text_preview(result)
-                progress.update(task_id, advance=1, description=f"[green]✓[/] {f.name} [{chars}c] {preview}")
+                progress.update(task_id, advance=1, description=f"[green]✓[/] {f.name} [{chars:,}c]")
+
             # Intermediate save
             try:
                 with open(output_path, "w", encoding="utf-8") as fp:
@@ -374,8 +444,12 @@ async def _run_batch(
             except Exception:
                 pass
 
-    with Live(Panel(progress, title="[bold]Batch OCR[/]", border_style="cyan"), console=console, refresh_per_second=4):
-        await asyncio.gather(*[_process_one(f) for f in todo])
+    with Live(_build_display(), console=console, refresh_per_second=4) as live:
+        async def _run_and_update(f: Path):
+            await _process_one(f)
+            live.update(_build_display())
+
+        await asyncio.gather(*[_run_and_update(f) for f in todo])
 
     # Final save
     with open(output_path, "w", encoding="utf-8") as fp:

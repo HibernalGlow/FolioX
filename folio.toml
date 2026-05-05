@@ -13,10 +13,11 @@ ext = [".zip", ".rar", ".7z", ".tar", ".gz", ".pdf"]
 include_images = false
 
 # Skip layout detection (faster, recommended for batch)
-no_layout = false
+no_layout = true
 
 # Maximum concurrent OCR tasks
 concurrency = 4
 
 # Incremental mode by default
 incremental = true
+                                        
