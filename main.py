@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Folio-OCR Desktop Entry
-使用 pywebview 将 FastAPI 后端 + 前端打包为桌面应用
+使用 pywebview 将 FastAPI 后端 + Svelte 前端打包为桌面应用
 """
 import os
 import sys
@@ -9,6 +9,7 @@ import time
 import socket
 import threading
 import logging
+import subprocess
 from pathlib import Path
 
 # 确保工作目录为脚本所在目录（兼容 PyInstaller 打包后的路径）
@@ -51,6 +52,37 @@ def wait_for_server(port: int, timeout: float = 15.0) -> bool:
     return False
 
 
+def build_frontend_if_needed():
+    """如果前端未构建，自动执行 pnpm build"""
+    dist_dir = APP_DIR / "dist-frontend"
+    if dist_dir.exists() and (dist_dir / "index.html").exists():
+        logger.info("Frontend already built, skipping...")
+        return True
+
+    frontend_dir = APP_DIR / "frontend"
+    if not frontend_dir.exists():
+        logger.warning("No frontend/ directory found, using legacy mode")
+        return False
+
+    logger.info("Building Svelte frontend...")
+    try:
+        result = subprocess.run(
+            ["pnpm", "run", "build"],
+            cwd=str(frontend_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            logger.error(f"Frontend build failed:\n{result.stderr}")
+            return False
+        logger.info("Frontend built successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Frontend build error: {e}")
+        return False
+
+
 def start_server(port: int):
     """在子线程中启动 FastAPI 服务"""
     import uvicorn
@@ -63,6 +95,9 @@ def start_server(port: int):
 def main():
     """桌面应用主入口"""
     import webview
+
+    # 尝试构建前端
+    build_frontend_if_needed()
 
     port = find_free_port()
     logger.info(f"Using port: {port}")

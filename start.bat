@@ -1,29 +1,14 @@
 @echo off
-chcp 65001 >nul
-title Folio-OCR Desktop
+cd /d "%~dp0"
 
-echo ========================================
-echo        Folio-OCR Desktop
-echo ========================================
-echo.
-
-cd /d %~dp0
-
-::: Check if uv venv exists
-if exist ".venv\Scripts\activate.bat" (
-    echo Activating uv virtual environment...
-    call .venv\Scripts\activate.bat
-) else if exist ".venv\Scripts\python.exe" (
-    echo Activating uv virtual environment...
-    .venv\Scripts\activate.bat
-) else (
-    echo Warning: Virtual environment not found, using global Python
+:: Build frontend if needed
+if not exist "dist-frontend\index.html" (
+    echo Building Svelte frontend...
+    cd frontend
+    call pnpm install
+    call pnpm run build
+    cd ..
 )
 
-echo.
-echo Starting Folio-OCR Desktop...
-echo.
-
-python main.py
-
-pause
+:: Start desktop app
+.venv\Scripts\python.exe main.py

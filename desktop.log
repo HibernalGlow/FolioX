@@ -5,3 +5,9 @@
 2026-05-05 17:48:23,954 - ERROR - Server failed to start within timeout!
 2026-05-05 17:49:47,555 - INFO - === Server starting, log file: D:\1VSCODE\Projects\ImageAll\FolioX\server.log ===
 2026-05-05 17:49:47,555 - INFO - === App root: D:\1VSCODE\Projects\ImageAll\FolioX ===
+2026-05-05 18:13:46,413 - INFO - Frontend already built, skipping...
+2026-05-05 18:13:46,414 - INFO - Using port: 52985
+2026-05-05 18:13:47,143 - INFO - === Server starting, log file: D:\1VSCODE\Projects\ImageAll\FolioX\server.log ===
+2026-05-05 18:13:47,144 - INFO - === App root: D:\1VSCODE\Projects\ImageAll\FolioX ===
+2026-05-05 18:13:47,184 - INFO - Starting FastAPI on 127.0.0.1:52985
+2026-05-05 18:13:47,957 - INFO - Server is ready, opening window...

@@ -56,6 +56,7 @@
 ### 环境要求
 
 - Python 3.10+（推荐 3.11）
+- [Node.js](https://nodejs.org/) 18+（构建前端需要）
 - [Ollama](https://ollama.com/) 已安装且 `ollama` 在 PATH 中
 - [uv](https://docs.astral.sh/uv/) 包管理器（可选，也可用 pip）
 
@@ -66,23 +67,28 @@
 git clone https://github.com/vorojar/Folio-OCR.git
 cd Folio-OCR
 
-# 2. 创建虚拟环境并安装依赖
+# 2. 创建虚拟环境并安装 Python 依赖
 uv venv --python 3.11
 uv sync
 
-# 3. 拉取 OCR 模型（约 2GB，只需执行一次）
+# 3. 构建前端（Svelte + Tailwind CSS）
+cd frontend && pnpm install && pnpm run build && cd ..
+
+# 4. 拉取 OCR 模型（约 2GB，只需执行一次）
 ollama pull glm-ocr
 
-# 4. 启动桌面应用
+# 5. 启动桌面应用
 python main.py
 
-# 或 Windows 一键启动
+# 或 Windows 一键启动（自动构建前端）
 start.bat
 ```
 
 启动后会自动弹出桌面窗口，无需手动打开浏览器。
 
-> **开发调试？** 使用 Web 模式启动：`python server.py`，然后访问 http://localhost:3000
+> **开发调试？**
+> - Web 模式：`python server.py`，然后访问 http://localhost:3000
+> - 前端热重载：`cd frontend && pnpm run dev`（Vite dev server + API 代理）
 
 ---
 
@@ -151,9 +157,30 @@ start-web.bat
 Folio-OCR/
 ├── main.py              # 桌面应用入口（pywebview）
 ├── server.py            # FastAPI 后端（单文件）
-├── index.html           # HTML 页面
-├── script.js            # 前端逻辑
-├── style.css            # 样式
+├── frontend/            # Svelte 5 前端项目
+│   ├── src/
+│   │   ├── App.svelte          # 主布局（三栏）
+│   │   ├── main.ts             # 入口
+│   │   ├── app.css             # 全局样式（Tailwind CSS）
+│   │   ├── lib/
+│   │   │   ├── api.ts          # API 客户端
+│   │   │   ├── stores.ts       # Svelte stores（状态管理）
+│   │   │   ├── types.ts        # TypeScript 类型
+│   │   │   └── utils.ts       # Markdown 渲染、搜索高亮
+│   │   └── components/
+│   │       ├── TopBar.svelte    # 顶部导航栏
+│   │       ├── DocList.svelte   # 文档列表
+│   │       ├── PageList.svelte  # 页面缩略图
+│   │       ├── UploadZone.svelte # 上传区
+│   │       ├── Preview.svelte   # 图片预览 + bbox
+│   │       ├── OcrResult.svelte  # OCR 结果面板
+│   │       ├── ResizeHandle.svelte # 拖拽调整
+│   │       ├── ProgressBar.svelte # 进度条
+│   │       └── ToastContainer.svelte # 通知
+│   ├── vite.config.ts
+│   ├── tailwind.config.ts
+│   └── package.json
+├── dist-frontend/       # Svelte 构建产物（npm run build 生成）
 ├── latex_unicode.json   # LaTeX → Unicode 映射表
 ├── pyproject.toml       # 项目配置 + 依赖（uv 规范）
 ├── requirements.txt     # Python 依赖（兼容旧版）

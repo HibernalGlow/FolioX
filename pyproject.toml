@@ -35,8 +35,13 @@ packages = ["."]
 [tool.hatch.build]
 exclude = [
     ".venv",
+    "frontend/node_modules",
+    "frontend/dist",
     "uploads",
     "*.db",
     "__pycache__",
     "docs",
 ]
+
+[tool.scripts]
+build-frontend = "cd frontend && pnpm install && pnpm run build"

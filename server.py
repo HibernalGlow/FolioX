@@ -37,6 +37,11 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 # Application root directory (compatible with PyInstaller frozen mode)
 APP_ROOT = Path(os.environ.get("FOLIO_APP_ROOT", Path(__file__).parent.resolve()))
 
+# Frontend directory: prefer Svelte build output, fallback to legacy files
+FRONTEND_DIR = APP_ROOT / "dist-frontend"
+if not FRONTEND_DIR.exists():
+    FRONTEND_DIR = APP_ROOT  # fallback to legacy index.html in root
+
 # Setup logging
 LOG_FILE = APP_ROOT / "server.log"
 logging.basicConfig(
@@ -838,7 +843,7 @@ def _safe_doc_path(doc_id: str, filename: str = "") -> Path:
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve frontend page"""
-    index_path = APP_ROOT / "index.html"
+    index_path = FRONTEND_DIR / "index.html"
     with open(str(index_path), "r", encoding="utf-8") as f:
         return f.read()
 
@@ -1476,8 +1481,8 @@ async def export_docx(doc_id: str, req: _ExportRequest):
 
 
 # Static files — must be last so it doesn't shadow API routes
-# Serves any file in the project root (style.css, script.js, etc.)
-app.mount("/", StaticFiles(directory=str(APP_ROOT)), name="static")
+# Serves Svelte frontend build (or legacy files as fallback)
+app.mount("/", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
 if __name__ == "__main__":
