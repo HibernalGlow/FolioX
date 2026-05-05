@@ -4,7 +4,7 @@
 [batch]
 # Blacklist keywords: folders whose name contains any of these keywords will be skipped
 # Useful for skipping image-only galleries that have no text to OCR
-blacklist = ["画集"]
+blacklist = ["画集","[03gen]"]
 
 # Default file extensions to process
 ext = [".zip", ".rar", ".7z", ".tar", ".gz", ".pdf"]

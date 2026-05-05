@@ -25,6 +25,16 @@ def init_db():
             ocr_time    REAL,
             PRIMARY KEY (doc_id, num)
         );
+        CREATE TABLE IF NOT EXISTS dir_cache (
+            dir_path       TEXT PRIMARY KEY,
+            dir_mtime      REAL NOT NULL,
+            ext_filter     TEXT NOT NULL DEFAULT '',
+            include_images INTEGER NOT NULL DEFAULT 0,
+            blacklist_key  TEXT NOT NULL DEFAULT '',
+            files_json     TEXT NOT NULL DEFAULT '[]',
+            skipped_count  INTEGER NOT NULL DEFAULT 0,
+            scanned_at     TEXT NOT NULL
+        );
     """)
     conn.commit()
     conn.close()

@@ -140,12 +140,95 @@ def pdf_to_page_images(pdf_path: Path, tmp_dir: Path) -> list[Path]:
     return images
 
 
+def _dir_cache_key(ext_filter: set[str], include_images: bool, blacklist: list[str]) -> str:
+    """Build a cache key from scan parameters."""
+    import hashlib
+    h = hashlib.md5()
+    h.update(",".join(sorted(ext_filter)).encode())
+    h.update(str(include_images).encode())
+    h.update(",".join(sorted(blacklist)).encode())
+    return h.hexdigest()
+
+
+def _try_dir_cache(input_dir: Path, ext_filter: set[str], include_images: bool,
+                    blacklist: list[str]) -> tuple[list[Path], int] | None:
+    """Try to load cached file listing from DB. Returns None if cache miss."""
+    from ..database import get_db
+    try:
+        st = input_dir.stat()
+    except OSError:
+        return None
+    bl_key = _dir_cache_key(ext_filter, include_images, blacklist)
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT files_json, skipped_count, dir_mtime FROM dir_cache WHERE dir_path = ? AND blacklist_key = ?",
+                (str(input_dir), bl_key),
+            ).fetchone()
+            if not row:
+                return None
+            # Check directory mtime (quick stat of top-level dir)
+            if abs(row["dir_mtime"] - st.st_mtime) > 1.0:
+                return None
+            # Spot-check a few cached files still exist
+            import json
+            cached_paths = json.loads(row["files_json"])
+            if not cached_paths:
+                return None
+            # Check up to 5 random files
+            import random
+            sample = random.sample(cached_paths, min(5, len(cached_paths)))
+            for p_str in sample:
+                if not Path(p_str).exists():
+                    return None
+            return [Path(p) for p in cached_paths], row["skipped_count"]
+    except Exception:
+        return None
+
+
+def _save_dir_cache(input_dir: Path, ext_filter: set[str], include_images: bool,
+                    blacklist: list[str], files: list[Path], skipped: int):
+    """Save file listing cache to DB."""
+    from ..database import get_db
+    import json
+    from datetime import datetime
+    try:
+        st = input_dir.stat()
+        bl_key = _dir_cache_key(ext_filter, include_images, blacklist)
+        with get_db() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO dir_cache
+                   (dir_path, dir_mtime, ext_filter, include_images, blacklist_key, files_json, skipped_count, scanned_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(input_dir),
+                    st.st_mtime,
+                    ",".join(sorted(ext_filter)),
+                    int(include_images),
+                    bl_key,
+                    json.dumps([str(f) for f in files], ensure_ascii=False),
+                    skipped,
+                    datetime.now().isoformat(),
+                ),
+            )
+    except Exception as e:
+        logger.debug(f"Failed to save dir cache: {e}")
+
+
 def collect_files(input_dir: Path, ext_filter: set[str], include_images: bool,
-                  blacklist: list[str] | None = None) -> tuple[list[Path], int]:
+                  blacklist: list[str] | None = None, rescan: bool = False) -> tuple[list[Path], int, bool]:
     """Collect files matching ext_filter, skipping folders with blacklisted names.
-    Returns (matched_files, skipped_by_blacklist_count).
+    Returns (matched_files, skipped_by_blacklist_count, from_cache).
+    Uses DB cache to avoid repeated directory scans.
     """
     bl = blacklist or BATCH_CONFIG.get("blacklist", [])
+
+    # Try cache first (unless --rescan)
+    if not rescan:
+        cached = _try_dir_cache(input_dir, ext_filter, include_images, bl)
+        if cached is not None:
+            return cached[0], cached[1], True
+
     files = []
     skipped = 0
     for p in sorted(input_dir.rglob("*")):
@@ -160,7 +243,10 @@ def collect_files(input_dir: Path, ext_filter: set[str], include_images: bool,
             files.append(p)
         elif include_images and suffix in IMAGE_EXTS:
             files.append(p)
-    return files, skipped
+
+    # Save to cache
+    _save_dir_cache(input_dir, ext_filter, include_images, bl, files, skipped)
+    return files, skipped, False
 
 
 # --- OCR processing (page-by-page generator) ---
@@ -270,9 +356,11 @@ async def process_document_pages(source_path: Path, use_layout: bool = True):
 
 def show_file_preview(input_dir: Path, ext_filter: set[str], include_images: bool,
                       existing_sources: set[str], existing_hashes: set[str],
-                      blacklist: list[str] | None = None) -> list[Path]:
+                      blacklist: list[str] | None = None, rescan: bool = False) -> list[Path]:
     """Show a rich table of files to be processed, return the todo list."""
-    all_files, skipped = collect_files(input_dir, ext_filter, include_images, blacklist=blacklist)
+    all_files, skipped, from_cache = collect_files(input_dir, ext_filter, include_images, blacklist=blacklist, rescan=rescan)
+    if from_cache:
+        console.print(f"[dim]📂 Using cached file listing[/]")
     if not all_files:
         if skipped:
             console.print(f"[yellow]No matching files found.[/] [dim]({skipped} skipped by blacklist)[/]")
@@ -404,7 +492,7 @@ async def _run_batch(
     async def _process_one(f: Path):
         nonlocal total_chars, total_errors
         async with semaphore:
-            progress.update(task_id, description=f.name)
+            progress.update(task_id, description=str(f))
             result_dict = None
             async for event_type, data in process_document_pages(f, use_layout=use_layout):
                 if event_type == "page":
@@ -479,6 +567,7 @@ def run_batch_cmd(
     incremental: bool,
     blacklist: Optional[list[str]] = None,
     yes: bool = False,
+    rescan: bool = False,
 ):
     """Typer callback for `folio batch`."""
     # Init DB
@@ -532,7 +621,7 @@ def run_batch_cmd(
 
     # Show file preview
     todo = show_file_preview(input_dir, ext_filter, images, existing_sources, existing_hashes,
-                             blacklist=bl)
+                             blacklist=bl, rescan=rescan)
     if not todo:
         console.print("[green]All files already processed ✓[/]")
         return

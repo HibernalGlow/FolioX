@@ -51,6 +51,7 @@ def batch(
     incremental: bool = typer.Option(None, "--incremental/--no-incremental", help="增量模式（跳过已处理文件）"),
     blacklist: str = typer.Option(None, "--blacklist", help="黑名单关键词（逗号分隔，跳过匹配的文件夹）"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认直接开始"),
+    rescan: bool = typer.Option(False, "--rescan", help="强制重新扫描目录（忽略缓存）"),
 ):
     """批量 OCR：扫描目录中的压缩包/图片，输出 JSON"""
     from ..config import BATCH_CONFIG
@@ -73,6 +74,7 @@ def batch(
         incremental=_incremental,
         blacklist=_blacklist,
         yes=yes,
+        rescan=rescan,
     )
 
 
