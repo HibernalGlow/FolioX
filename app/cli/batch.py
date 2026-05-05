@@ -519,11 +519,11 @@ async def _run_batch(
             results.append(result_dict)
             if result_dict.get("error"):
                 total_errors += 1
-                progress.update(task_id, advance=1, description=f"[red]✗[/] {f.name}")
+                progress.update(task_id, advance=1, description=f"[red]✗[/] {f}")
             else:
                 chars = result_dict.get("total_chars", 0)
                 total_chars += chars
-                progress.update(task_id, advance=1, description=f"[green]✓[/] {f.name} [{chars:,}c]")
+                progress.update(task_id, advance=1, description=f"[green]✓[/] {f} [{chars:,}c]")
 
             # Intermediate save
             try:
