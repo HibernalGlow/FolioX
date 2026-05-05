@@ -34,8 +34,11 @@ from docx.oxml.ns import qn
 from docx.enum.section import WD_SECTION_START
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+# Application root directory (compatible with PyInstaller frozen mode)
+APP_ROOT = Path(os.environ.get("FOLIO_APP_ROOT", Path(__file__).parent.resolve()))
+
 # Setup logging
-LOG_FILE = Path(__file__).parent / "server.log"
+LOG_FILE = APP_ROOT / "server.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -47,6 +50,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger.info(f"=== Server starting, log file: {LOG_FILE} ===")
+logger.info(f"=== App root: {APP_ROOT} ===")
 
 app = FastAPI(title="Folio-OCR Service", version="3.2.0")
 
@@ -60,7 +64,7 @@ app.add_middleware(
 )
 
 # Directories
-UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR = APP_ROOT / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 # Ollama config
@@ -69,7 +73,7 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "glm-ocr")
 OCR_PROMPT = "识别图片中的全部内容，输出Markdown格式。跳过页眉页脚和页码。"
 
 # LaTeX → Unicode mapping (loaded once at import time)
-_LATEX_MAP_FILE = Path(__file__).parent / "latex_unicode.json"
+_LATEX_MAP_FILE = APP_ROOT / "latex_unicode.json"
 with open(_LATEX_MAP_FILE, "r", encoding="utf-8") as _f:
     _LATEX_DATA = json.load(_f)
 _LATEX_SIMPLE: list[tuple[str, str]] = sorted(
@@ -79,7 +83,7 @@ _LATEX_FRACTIONS: dict[str, str] = _LATEX_DATA.get("fractions", {})
 _CIRCLED = {str(i): chr(0x2460 + i - 1) for i in range(1, 21)}  # ①-⑳
 
 # --- SQLite persistence ---
-DB_PATH = Path(os.environ.get("DB_PATH", Path(__file__).parent / "folio_ocr.db"))
+DB_PATH = Path(os.environ.get("DB_PATH", APP_ROOT / "folio_ocr.db"))
 
 
 def _init_db():
@@ -834,7 +838,8 @@ def _safe_doc_path(doc_id: str, filename: str = "") -> Path:
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve frontend page"""
-    with open("index.html", "r", encoding="utf-8") as f:
+    index_path = APP_ROOT / "index.html"
+    with open(str(index_path), "r", encoding="utf-8") as f:
         return f.read()
 
 
@@ -1472,9 +1477,10 @@ async def export_docx(doc_id: str, req: _ExportRequest):
 
 # Static files — must be last so it doesn't shadow API routes
 # Serves any file in the project root (style.css, script.js, etc.)
-app.mount("/", StaticFiles(directory="."), name="static")
+app.mount("/", StaticFiles(directory=str(APP_ROOT)), name="static")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+    port = int(os.environ.get("FOLIO_PORT", 3000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

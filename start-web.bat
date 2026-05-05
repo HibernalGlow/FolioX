@@ -1,9 +1,10 @@
 @echo off
 chcp 65001 >nul
-title Folio-OCR Desktop
+title Folio-OCR Web Server
 
 echo ========================================
-echo        Folio-OCR Desktop
+echo        Folio-OCR Web Server
+echo        http://localhost:3000
 echo ========================================
 echo.
 
@@ -21,9 +22,12 @@ if exist ".venv\Scripts\activate.bat" (
 )
 
 echo.
-echo Starting Folio-OCR Desktop...
+echo Starting web server at http://localhost:3000
+echo Press Ctrl+C to stop
+echo.
+echo ========================================
 echo.
 
-python main.py
+python server.py
 
 pause

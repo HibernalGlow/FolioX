@@ -2,7 +2,7 @@
 
 基于 [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) + [Ollama](https://ollama.com/) 的三栏文档 OCR 工作台，专为书籍和文档的日常批量识别设计。
 
-![架构](https://img.shields.io/badge/Backend-FastAPI-009688?style=flat-square) ![前端](https://img.shields.io/badge/Frontend-Vanilla_JS-F7DF1E?style=flat-square) ![数据库](https://img.shields.io/badge/DB-SQLite-003B57?style=flat-square) [![主页](https://img.shields.io/badge/Homepage-GitHub%20Pages-D4A373?style=flat-square)](https://vorojar.github.io/Folio-OCR/)
+![架构](https://img.shields.io/badge/Backend-FastAPI-009688?style=flat-square) ![前端](https://img.shields.io/badge/Frontend-Vanilla_JS-F7DF1E?style=flat-square) ![桌面](https://img.shields.io/badge/Desktop-PyWebView-4B8BBE?style=flat-square) ![数据库](https://img.shields.io/badge/DB-SQLite-003B57?style=flat-square) [![主页](https://img.shields.io/badge/Homepage-GitHub%20Pages-D4A373?style=flat-square)](https://vorojar.github.io/Folio-OCR/)
 
 ![Folio-OCR 界面截图](demo.png)
 
@@ -51,6 +51,41 @@
 - Toast 弹窗通知：保存失败、OCR 超时、加载错误等即时反馈
 - Ollama 断开后 UI 不会冻住，超时后自动恢复可操作状态
 
+## 快速开始（桌面应用）
+
+### 环境要求
+
+- Python 3.10+（推荐 3.11）
+- [Ollama](https://ollama.com/) 已安装且 `ollama` 在 PATH 中
+- [uv](https://docs.astral.sh/uv/) 包管理器（可选，也可用 pip）
+
+### 安装和启动
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/vorojar/Folio-OCR.git
+cd Folio-OCR
+
+# 2. 创建虚拟环境并安装依赖
+uv venv --python 3.11
+uv sync
+
+# 3. 拉取 OCR 模型（约 2GB，只需执行一次）
+ollama pull glm-ocr
+
+# 4. 启动桌面应用
+python main.py
+
+# 或 Windows 一键启动
+start.bat
+```
+
+启动后会自动弹出桌面窗口，无需手动打开浏览器。
+
+> **开发调试？** 使用 Web 模式启动：`python server.py`，然后访问 http://localhost:3000
+
+---
+
 ## 快速开始（Docker 一键部署）
 
 只需装好 [Docker](https://docs.docker.com/get-docker/)，三条命令搞定：
@@ -82,7 +117,7 @@ docker compose logs -f ollama # 查看 Ollama 日志
 
 ---
 
-## 本地部署（不用 Docker）
+## 本地部署（Web 模式）
 
 ### 环境要求
 
@@ -98,14 +133,14 @@ pip install -r requirements.txt
 # 拉取模型
 ollama pull glm-ocr
 
-# 启动服务
+# 启动 Web 服务
 python server.py
 
 # 或使用热重载开发
 uvicorn server:app --reload --host 0.0.0.0 --port 3000
 
-# Windows 一键启动
-start.bat
+# Windows 一键启动（Web 模式）
+start-web.bat
 ```
 
 服务启动后访问：http://localhost:3000
@@ -113,17 +148,20 @@ start.bat
 ## 项目结构
 
 ```
-glmocr/
+Folio-OCR/
+├── main.py              # 桌面应用入口（pywebview）
 ├── server.py            # FastAPI 后端（单文件）
 ├── index.html           # HTML 页面
 ├── script.js            # 前端逻辑
 ├── style.css            # 样式
 ├── latex_unicode.json   # LaTeX → Unicode 映射表
-├── requirements.txt     # Python 依赖
+├── pyproject.toml       # 项目配置 + 依赖（uv 规范）
+├── requirements.txt     # Python 依赖（兼容旧版）
+├── Folio-OCR.spec       # PyInstaller 打包配置
 ├── Dockerfile           # Docker 镜像构建
 ├── docker-compose.yml   # Docker Compose 编排
-├── .dockerignore        # Docker 构建排除列表
-├── start.bat            # Windows 启动脚本
+├── start.bat            # Windows 桌面模式启动
+├── start-web.bat        # Windows Web 模式启动
 ├── folio_ocr.db         # SQLite 数据库（运行时生成）
 └── uploads/             # 上传文件目录（运行时生成）
 ```

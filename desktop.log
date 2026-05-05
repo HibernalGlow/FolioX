@@ -1,0 +1,7 @@
+2026-05-05 17:48:07,013 - INFO - Using port: 50211
+2026-05-05 17:48:07,687 - INFO - === Server starting, log file: D:\1VSCODE\Projects\ImageAll\FolioX\server.log ===
+2026-05-05 17:48:07,687 - INFO - === App root: D:\1VSCODE\Projects\ImageAll\FolioX ===
+2026-05-05 17:48:07,726 - INFO - Starting FastAPI on 127.0.0.1:50211
+2026-05-05 17:48:23,954 - ERROR - Server failed to start within timeout!
+2026-05-05 17:49:47,555 - INFO - === Server starting, log file: D:\1VSCODE\Projects\ImageAll\FolioX\server.log ===
+2026-05-05 17:49:47,555 - INFO - === App root: D:\1VSCODE\Projects\ImageAll\FolioX ===

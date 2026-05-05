@@ -5,33 +5,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Folio-OCR is a three-column document OCR workbench powered by [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) via Ollama. Single-file FastAPI backend + single-file frontend, designed for daily batch OCR of books and documents.
+Folio-OCR is a three-column document OCR workbench powered by [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) via Ollama. Desktop app via pywebview + FastAPI embedded server.
 
 ## Commands
 
 ```bash
-# Start server
+# 桌面应用模式（推荐）
+python main.py
+
+# Web 服务模式（开发调试）
 python server.py
 
-# Start with hot reload
+# 使用 uv 管理依赖
+uv sync                          # 安装依赖
+uv venv --python 3.11            # 创建虚拟环境
+
+# 热重载开发
 uvicorn server:app --reload --host 0.0.0.0 --port 3000
 
-# Install dependencies
-pip install -r requirements.txt
-
-# Windows quick start
+# Windows 一键启动（桌面模式）
 start.bat
+
+# Windows 一键启动（Web 模式）
+start-web.bat
+
+# 打包为 .exe
+pyinstaller Folio-OCR.spec
 ```
 
 ## Prerequisites
 
 - [Ollama](https://ollama.com/) installed and `ollama` in PATH
 - Pull the model: `ollama pull glm-ocr`
+- Python 3.10+ (推荐 3.11，torch 兼容性最好)
 
 ## Architecture
 
+**Desktop Entry** (`main.py`):
+- pywebview creates a native window loading the FastAPI frontend
+- FastAPI runs on a random free port (via `FOLIO_PORT` env var)
+- `wait_for_server()` polls `/api/status` until ready, then opens window
+- Window close → entire process exits
+
 **Backend** (`server.py`):
-- FastAPI app with CORS, version 3.1.0
+- FastAPI app with CORS, version 3.2.0
+- All paths based on `APP_ROOT` (resolved from `__file__` or `FOLIO_APP_ROOT` env var, PyInstaller compatible)
 - OCR via Ollama `/api/chat` (base64 images), model `glm-ocr` on `localhost:11434`
 - Chinese OCR prompt: 识别正文 + 跳过页眉页脚 + 表格输出为 Markdown/HTML
 - Auto-strips ```` ```markdown ``` ```` fences from model output
@@ -40,6 +58,7 @@ start.bat
 - SQLite persistence (`folio_ocr.db`), uploads in `uploads/{doc_id}/`, orphan cleanup on startup
 - Path traversal protection via `_safe_doc_path()`
 - Auto-starts Ollama if not running
+- Standalone mode: `python server.py` → port 3000 (or `FOLIO_PORT` env var)
 
 **Frontend** (`index.html`):
 - Warm cream/charcoal theme (CSS variables: `--cream`, `--charcoal`, `--accent`)
@@ -71,3 +90,5 @@ start.bat
 - DOCX export uses real python-docx, no external HTML needed
 - SQLite persistence (`folio_ocr.db`) — documents and OCR results survive server restarts
 - Frontend auto-restores last document on page load, auto-saves edits (800ms debounce)
+- Desktop mode: `main.py` → pywebview window + FastAPI on random port
+- Web mode: `python server.py` → http://localhost:3000
