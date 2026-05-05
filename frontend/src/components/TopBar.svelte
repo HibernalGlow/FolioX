@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { activeDocId, activeDocFilename, modelLoaded, layoutModelLoaded, isLoadingModel, layoutEnabled, ocrRunning, viewMode, currentPage, pages, batchActive, batchStatus } from '$lib/stores';
+  import { activeDocId, activeDocFilename, modelLoaded, layoutModelLoaded, isLoadingModel, layoutEnabled, ocrRunning, viewMode, currentPage, pages } from '$lib/stores';
   import * as api from '$lib/api';
   import { addToast } from '$lib/stores';
 
-  let showBatchPanel = $bindable(false);
   let statusText = $state('Checking...');
   let statusType = $state<'online' | 'loading' | 'error'>('loading');
   let showExportMenu = $state(false);
@@ -250,14 +249,6 @@
   <button onclick={() => document.getElementById('fileInput')?.click()}
     class="rounded-xl bg-white/10 px-3.5 py-1.5 text-[13px] font-medium text-white/80 transition-all hover:bg-white/18 hover:text-white">
     Upload
-  </button>
-
-  <!-- Batch -->
-  <button onclick={() => showBatchPanel = !showBatchPanel}
-    class="rounded-xl px-3.5 py-1.5 text-[13px] font-medium transition-all
-      {$batchActive || showBatchPanel ? 'bg-accent text-white' : 'bg-white/10 text-white/80 hover:bg-white/18 hover:text-white'}
-      {$batchStatus === 'running' ? 'animate-pulse' : ''}">
-    Batch
   </button>
 
   {#if showDoc}

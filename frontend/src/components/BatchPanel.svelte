@@ -28,12 +28,23 @@
     return formatEta(remaining);
   });
 
+  // --- Strip wrapping quotes from pasted paths ---
+  function stripQuotes(p: string): string {
+    p = p.trim();
+    if ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
+      p = p.slice(1, -1);
+    }
+    return p.trim();
+  }
+
   // --- Browse directory ---
   async function browse() {
-    if (!pathInput.trim()) return;
+    const clean = stripQuotes(pathInput);
+    if (!clean) return;
+    pathInput = clean;  // update input to show cleaned path
     browsing = true;
     try {
-      browseData = await api.browseDirectory(pathInput);
+      browseData = await api.browseDirectory(clean);
     } catch (e: any) {
       addToast(e.message || 'Browse failed');
       browseData = null;
@@ -56,11 +67,13 @@
 
   // --- Start batch ---
   async function startBatch() {
-    if (!pathInput.trim()) return;
+    const clean = stripQuotes(pathInput);
+    if (!clean) return;
+    pathInput = clean;
 
     try {
       const result = await api.startBatch(
-        pathInput,
+        clean,
         '.zip,.rar,.7z,.tar,.gz,.pdf',
         optImages,
         optLayout,
@@ -77,7 +90,10 @@
       batchActive.set(true);
 
       if (result.skipped > 0) {
-        addToast(`Skipped ${result.skipped} already-processed file(s)`, 'success');
+        const parts: string[] = [];
+        if (result.skipped_by_path > 0) parts.push(`${result.skipped_by_path} by path`);
+        if (result.skipped_by_hash > 0) parts.push(`${result.skipped_by_hash} by hash`);
+        addToast(`Skipped ${result.skipped} file(s): ${parts.join(', ')}`, 'success');
       }
 
       // Listen to SSE progress
@@ -285,11 +301,37 @@
         {/if}
       </div>
 
+      <!-- Processed status -->
+      {#if browseData.processed_count > 0}
+        <div class="mt-1 flex items-center gap-1.5 text-[10px]">
+          <span class="text-emerald-500">✓ {browseData.processed_count} already processed</span>
+          <span class="text-charcoal/30">·</span>
+          <span class="text-accent">{browseData.total_files - browseData.processed_count} pending</span>
+        </div>
+      {/if}
+
+      <!-- File list with processed badges -->
+      {#if browseData.total_files > 0}
+        <div class="mt-2 max-h-[120px] overflow-y-auto">
+          {#each [...browseData.archives, ...browseData.pdfs, ...browseData.images] as f}
+            <div class="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px] hover:bg-cream">
+              {#if f.processed}
+                <span class="text-emerald-500">✓</span>
+              {:else}
+                <span class="text-charcoal/20">○</span>
+              {/if}
+              <span class="flex-1 truncate {f.processed ? 'text-charcoal/40' : 'text-charcoal/70'}">{f.name}</span>
+              <span class="flex-shrink-0 text-[10px] text-charcoal/25">{f.size_mb}MB</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
       <!-- Start button -->
       {#if browseData.total_files > 0}
         <button onclick={startBatch}
           class="mt-2 w-full rounded-lg bg-accent py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-accent-dark">
-          Start Batch ({browseData.total_files} files)
+          Start Batch ({browseData.total_files - browseData.processed_count} pending{browseData.processed_count > 0 ? `, ${browseData.processed_count} done` : ''})
         </button>
       {/if}
     </div>

@@ -31,6 +31,45 @@ PDF_EXT = ".pdf"
 batch_tasks: dict[str, dict] = {}  # batch_id -> {status, progress, result, cancel}
 
 
+# --- Fingerprinting ---
+
+def _file_fingerprint(path: Path) -> str:
+    """Fast fingerprint: md5 of (first 1MB + file size + mtime)."""
+    import hashlib
+    h = hashlib.md5()
+    try:
+        st = path.stat()
+        h.update(f"{st.st_size}:{int(st.st_mtime)}".encode())
+        with open(path, "rb") as f:
+            h.update(f.read(1 << 20))  # first 1MB
+    except OSError:
+        h.update(str(path).encode())
+    return h.hexdigest()
+
+
+def _load_existing_results(output_path: Path) -> tuple[list[dict], set[str], set[str]]:
+    """Load existing ocr_results.json, return (results, source_paths, file_hashes)."""
+    if not output_path.exists():
+        return [], set(), set()
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if not isinstance(existing, list):
+            return [], set(), set()
+        source_paths = set()
+        file_hashes = set()
+        for r in existing:
+            sp = r.get("source_path", "")
+            fh = r.get("file_hash", "")
+            if sp:
+                source_paths.add(sp)
+            if fh:
+                file_hashes.add(fh)
+        return existing, source_paths, file_hashes
+    except Exception:
+        return [], set(), set()
+
+
 def _extract_archive(archive_path: Path, tmp_dir: Path) -> list[Path]:
     """Extract archive, return list of image/PDF files."""
     suffix = archive_path.suffix.lower()
@@ -91,9 +130,12 @@ def _collect_files(input_dir: Path, ext_filter: set[str], include_images: bool) 
 async def _process_document(source_path: Path, use_layout: bool = True) -> dict:
     """Process a single document, return result dict."""
     t0 = time.time()
+    file_hash = _file_fingerprint(source_path)
     result = {
         "source": source_path.name,
         "source_path": str(source_path),
+        "file_hash": file_hash,
+        "file_size": source_path.stat().st_size,
         "type": "",
         "pages": [],
         "total_time": 0,
@@ -198,6 +240,7 @@ async def batch_start(
     incremental: bool = Query(False, description="Skip already-processed files"),
 ):
     """Start a batch OCR job on a local directory. Returns batch_id, then streams progress via SSE."""
+    path = _clean_path(path)
     input_dir = Path(path).resolve()
     if not input_dir.is_dir():
         raise HTTPException(400, f"Not a directory: {path}")
@@ -209,20 +252,30 @@ async def batch_start(
 
     batch_id = str(uuid.uuid4())[:8]
 
-    # Load previous results for incremental
-    existing_sources: set[str] = set()
+    # Load previous results for incremental (path + hash dedup)
     output_path = input_dir / "ocr_results.json"
-    if incremental and output_path.exists():
-        try:
-            with open(output_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            if isinstance(existing, list):
-                existing_sources = {r.get("source_path", "") for r in existing}
-        except Exception:
-            pass
+    existing_results: list[dict] = []
+    existing_sources: set[str] = set()
+    existing_hashes: set[str] = set()
+    if incremental:
+        existing_results, existing_sources, existing_hashes = _load_existing_results(output_path)
 
-    # Filter out already-processed
-    todo = [f for f in files if str(f) not in existing_sources] if incremental else files
+    # Filter out already-processed: path match first, then hash match
+    skipped_by_path = 0
+    skipped_by_hash = 0
+    todo: list[Path] = []
+    for f in files:
+        fstr = str(f)
+        if fstr in existing_sources:
+            skipped_by_path += 1
+            continue
+        # Compute hash only if incremental and path not matched
+        if incremental and existing_hashes:
+            fh = _file_fingerprint(f)
+            if fh in existing_hashes:
+                skipped_by_hash += 1
+                continue
+        todo.append(f)
 
     # Initialize batch state
     batch_tasks[batch_id] = {
@@ -230,23 +283,28 @@ async def batch_start(
         "total": len(todo),
         "done": 0,
         "current": "",
-        "results": [] if not incremental else (existing if isinstance(existing, list) else []),
+        "results": list(existing_results) if incremental else [],
         "cancel": False,
         "output_path": str(output_path),
         "start_time": time.time(),
     }
 
     # Return batch_id immediately, then start processing in background
-    asyncio.create_task(_run_batch(batch_id, todo, layout, existing_sources, output_path))
+    asyncio.create_task(_run_batch(batch_id, todo, layout, output_path))
 
-    return {"batch_id": batch_id, "total": len(todo), "skipped": len(files) - len(todo)}
+    return {
+        "batch_id": batch_id,
+        "total": len(todo),
+        "skipped": len(files) - len(todo),
+        "skipped_by_path": skipped_by_path,
+        "skipped_by_hash": skipped_by_hash,
+    }
 
 
 async def _run_batch(
     batch_id: str,
     files: list[Path],
     use_layout: bool,
-    existing_sources: set[str],
     output_path: Path,
 ):
     """Background task to process files and save results."""
@@ -382,14 +440,27 @@ async def batch_results(batch_id: str):
     }
 
 
+def _clean_path(p: str) -> str:
+    """Strip wrapping quotes from a path string."""
+    p = p.strip()
+    if len(p) >= 2 and ((p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'"))):
+        p = p[1:-1].strip()
+    return p
+
+
 @router.post("/api/batch/browse")
 async def batch_browse(path: str = Query(..., description="Directory path to browse")):
     """Browse a local directory to show available files for batch processing."""
+    path = _clean_path(path)
     input_dir = Path(path).resolve()
     if not input_dir.exists():
         raise HTTPException(400, f"Path does not exist: {path}")
     if not input_dir.is_dir():
         raise HTTPException(400, f"Not a directory: {path}")
+
+    # Pre-read existing results for fast "processed" marking
+    output_path = input_dir / "ocr_results.json"
+    _, existing_sources, existing_hashes = _load_existing_results(output_path)
 
     archives = []
     image_files = []
@@ -400,7 +471,14 @@ async def batch_browse(path: str = Query(..., description="Directory path to bro
             continue
         suffix = p.suffix.lower()
         size_mb = round(p.stat().st_size / 1024 / 1024, 1)
-        entry = {"name": p.name, "size_mb": size_mb, "path": str(p)}
+        fstr = str(p)
+
+        # Check if already processed (path first, then hash)
+        processed = fstr in existing_sources
+        if not processed and existing_hashes:
+            processed = _file_fingerprint(p) in existing_hashes
+
+        entry = {"name": p.name, "size_mb": size_mb, "path": fstr, "processed": processed}
         if suffix in ARCHIVE_EXTS:
             archives.append(entry)
         elif suffix == PDF_EXT:
@@ -414,6 +492,9 @@ async def batch_browse(path: str = Query(..., description="Directory path to bro
         if p.is_dir() and not p.name.startswith("."):
             subdirs.append({"name": p.name, "path": str(p)})
 
+    total = len(archives) + len(pdfs) + len(image_files)
+    processed_count = sum(1 for f in (archives + pdfs + image_files) if f["processed"])
+
     return {
         "path": str(input_dir),
         "parent": str(input_dir.parent),
@@ -421,5 +502,6 @@ async def batch_browse(path: str = Query(..., description="Directory path to bro
         "archives": archives,
         "pdfs": pdfs,
         "images": image_files,
-        "total_files": len(archives) + len(pdfs) + len(image_files),
+        "total_files": total,
+        "processed_count": processed_count,
     }

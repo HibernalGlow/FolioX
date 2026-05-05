@@ -54,22 +54,44 @@ ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".avif", ".jxl"}
 PDF_EXT = ".pdf"
 
-# JSON output schema per document:
-# {
-#     "source": "path/to/file.zip",
-#     "type": "archive" | "pdf" | "image",
-#     "pages": [
-#         {
-#             "page": 1,
-#             "text": "...",
-#             "regions": [...],   # only if --layout
-#             "time": 1.23
-#         }
-#     ],
-#     "total_time": 5.67,
-#     "total_chars": 1234,
-#     "error": null
-# }
+
+# --- Fingerprinting ---
+
+def file_fingerprint(path: Path) -> str:
+    """Fast fingerprint: md5 of (first 1MB + file size + mtime)."""
+    import hashlib
+    h = hashlib.md5()
+    try:
+        st = path.stat()
+        h.update(f"{st.st_size}:{int(st.st_mtime)}".encode())
+        with open(path, "rb") as f:
+            h.update(f.read(1 << 20))  # first 1MB
+    except OSError:
+        h.update(str(path).encode())
+    return h.hexdigest()
+
+
+def load_existing_results(output_path: Path) -> tuple[list[dict], set[str], set[str]]:
+    """Load ocr_results.json, return (results, source_paths, file_hashes)."""
+    if not output_path.exists():
+        return [], set(), set()
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if not isinstance(existing, list):
+            return [], set(), set()
+        source_paths = set()
+        file_hashes = set()
+        for r in existing:
+            sp = r.get("source", "")
+            fh = r.get("file_hash", "")
+            if sp:
+                source_paths.add(sp)
+            if fh:
+                file_hashes.add(fh)
+        return existing, source_paths, file_hashes
+    except Exception:
+        return [], set(), set()
 
 
 def extract_archive(archive_path: Path, tmp_dir: Path) -> list[Path]:
@@ -180,8 +202,11 @@ async def process_document(
 ) -> dict:
     """Process a single document (archive, PDF, or image)."""
     t0 = time.time()
+    file_hash = file_fingerprint(source_path)
     result = {
         "source": str(source_path),
+        "file_hash": file_hash,
+        "file_size": source_path.stat().st_size,
         "type": "",
         "pages": [],
         "total_time": 0,
@@ -293,23 +318,39 @@ async def run_batch(
         return
     logger.info(f"[batch] Found {len(files)} file(s) to process")
 
-    # Load existing results for incremental mode
+    # Load existing results for incremental mode (path + hash dedup)
     existing_sources: set[str] = set()
+    existing_hashes: set[str] = set()
     results: list[dict] = []
-    if incremental and output_path.exists():
-        with open(output_path, "r", encoding="utf-8") as f:
-            existing = json.load(f)
-            if isinstance(existing, list):
-                results = existing
-                existing_sources = {r["source"] for r in results if "source" in r}
-                logger.info(f"[batch] Incremental: {len(existing_sources)} already processed")
+    if incremental:
+        results, existing_sources, existing_hashes = load_existing_results(output_path)
+        if existing_sources or existing_hashes:
+            logger.info(f"[batch] Incremental: {len(existing_sources)} by path, {len(existing_hashes)} by hash")
 
-    # Filter out already-processed files
-    todo = [f for f in files if str(f) not in existing_sources]
+    # Filter out already-processed: path match first, then hash match
+    skipped_by_path = 0
+    skipped_by_hash = 0
+    todo: list[Path] = []
+    for f in files:
+        fstr = str(f)
+        if fstr in existing_sources:
+            skipped_by_path += 1
+            continue
+        if incremental and existing_hashes:
+            fh = file_fingerprint(f)
+            if fh in existing_hashes:
+                skipped_by_hash += 1
+                continue
+        todo.append(f)
     if not todo:
         logger.info("[batch] All files already processed")
     else:
-        logger.info(f"[batch] Processing {len(todo)} file(s) ({len(existing_sources)} skipped)")
+        skipped = skipped_by_path + skipped_by_hash
+        parts = []
+        if skipped_by_path: parts.append(f"{skipped_by_path} by path")
+        if skipped_by_hash: parts.append(f"{skipped_by_hash} by hash")
+        skip_msg = f" ({', '.join(parts)} skipped)" if skipped else ""
+        logger.info(f"[batch] Processing {len(todo)} file(s){skip_msg}")
 
     # Process with limited concurrency
     semaphore = asyncio.Semaphore(concurrency)
