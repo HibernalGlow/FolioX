@@ -1009,8 +1009,8 @@ async def upload_files(files: list[UploadFile] = File(...)):
                 # Single image
                 page_num += 1
                 # Convert formats that browsers may not render in <img> to PNG
-                # WebP is widely supported; AVIF/JXL may not work in older WebView2
-                NEED_CONVERT = {'.avif', '.jxl'}
+                # WebView2 (Chromium) supports AVIF/WebP natively; JXL is not supported
+                NEED_CONVERT = {'.jxl'}
                 if suffix in NEED_CONVERT:
                     img = Image.open(io.BytesIO(content)).convert("RGB")
                     img_name = f"page_{page_num:03d}.png"
