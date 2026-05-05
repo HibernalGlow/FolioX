@@ -180,6 +180,16 @@ async def startup_event():
             logger.info(f"[cleanup] Removing orphan directory: {child}")
             shutil.rmtree(child, ignore_errors=True)
 
+    # Auto-load models in background so the UI is ready immediately
+    async def _auto_load():
+        try:
+            await load_model_endpoint()
+            logger.info("[startup] Auto-load models completed")
+        except Exception as e:
+            logger.warning(f"[startup] Auto-load models failed: {e}")
+
+    asyncio.create_task(_auto_load())
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -998,9 +1008,17 @@ async def upload_files(files: list[UploadFile] = File(...)):
             else:
                 # Single image
                 page_num += 1
-                img_name = f"page_{page_num:03d}{suffix}"
-                with open(doc_dir / img_name, "wb") as fp:
-                    fp.write(content)
+                # Convert formats that browsers may not render in <img> to PNG
+                # WebP is widely supported; AVIF/JXL may not work in older WebView2
+                NEED_CONVERT = {'.avif', '.jxl'}
+                if suffix in NEED_CONVERT:
+                    img = Image.open(io.BytesIO(content)).convert("RGB")
+                    img_name = f"page_{page_num:03d}.png"
+                    img.save(str(doc_dir / img_name), format="PNG")
+                else:
+                    img_name = f"page_{page_num:03d}{suffix}"
+                    with open(doc_dir / img_name, "wb") as fp:
+                        fp.write(content)
 
                 with get_db() as conn:
                     conn.execute(

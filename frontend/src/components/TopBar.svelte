@@ -43,6 +43,13 @@
     return () => clearInterval(statusInterval);
   });
 
+  // Auto-load models on startup if not already loaded
+  $effect(() => {
+    if (!$modelLoaded || $layoutModelLoaded || $isLoadingModel) return;
+    // Ollama is online but layout model not loaded — auto trigger
+    ensureModelsLoaded();
+  });
+
   // --- Load model ---
   let _modelLoadPromise: Promise<boolean> | null = null;
 
