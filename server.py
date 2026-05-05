@@ -211,6 +211,9 @@ async def check_ollama() -> dict:
         return {"online": False, "model_loaded": False, "models": []}
 
 
+# OCR image size limits (glm-ocr F16 crashes on large images; 1280px balances speed & accuracy)
+OCR_MAX_LONG_SIDE = 1280  # resize so longest edge ≤ this before sending to Ollama
+OCR_MAX_PNG_BYTES = 1.5 * 1024 * 1024  # 1.5MB hard cap to avoid GGML assert
 # Max image height for single OCR call (fallback when layout detection returns nothing)
 MAX_IMAGE_HEIGHT = 1600
 SEGMENT_OVERLAP = 80
@@ -623,10 +626,39 @@ def _split_image(img: Image.Image) -> list[Image.Image]:
 
 
 def _image_to_b64(img: Image.Image) -> str:
-    """Convert PIL Image to base64 PNG string."""
+    """Convert PIL Image to base64 PNG string.
+
+    Automatically downscales if the image is too large for glm-ocr:
+    1. Resize so longest side ≤ OCR_MAX_LONG_SIDE (1280px by default)
+    2. If PNG still exceeds OCR_MAX_PNG_BYTES, shrink further
+    """
+    # Step 1: cap longest side
+    w, h = img.size
+    long_side = max(w, h)
+    if long_side > OCR_MAX_LONG_SIDE:
+        ratio = OCR_MAX_LONG_SIDE / long_side
+        nw, nh = int(w * ratio), int(h * ratio)
+        img = img.resize((nw, nh), Image.LANCZOS)
+
+    # Convert mode
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+
+    # Step 2: check PNG size, shrink further if needed
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    png_bytes = buf.getvalue()
+
+    if len(png_bytes) > OCR_MAX_PNG_BYTES:
+        ratio = (OCR_MAX_PNG_BYTES / len(png_bytes)) ** 0.5
+        nw, nh = int(img.size[0] * ratio), int(img.size[1] * ratio)
+        img = img.resize((nw, nh), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+        logger.info(f"[OCR] Resized to {nw}x{nh} (PNG {len(png_bytes)//1024}KB) to stay under size limit")
+
+    return base64.b64encode(png_bytes).decode("utf-8")
 
 
 async def _ocr_single(image_b64: str) -> str:
