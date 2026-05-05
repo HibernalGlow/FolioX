@@ -11,4 +11,4 @@ if not exist "dist-frontend\index.html" (
 )
 
 ::: Start desktop app (pywebview)
-.venv\Scripts\python.exe main.py desktop
+.venv\Scripts\folio.exe desktop

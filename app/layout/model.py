@@ -15,10 +15,17 @@ def ensure_model():
     if _model is not None:
         return
     import torch
-    from transformers import RTDetrImageProcessor, AutoModelForObjectDetection
+    from transformers import AutoModelForObjectDetection
+    # Compatible with both transformers 4.x and 5.x
+    try:
+        from transformers import RTDetrImageProcessor
+        _processor = RTDetrImageProcessor.from_pretrained(LAYOUT_MODEL_NAME)
+    except ImportError:
+        from transformers import AutoImageProcessor
+        _processor = AutoImageProcessor.from_pretrained(LAYOUT_MODEL_NAME)
     t0 = time.time()
     logger.info(f"[layout] Loading {LAYOUT_MODEL_NAME}...")
-    _processor = RTDetrImageProcessor.from_pretrained(LAYOUT_MODEL_NAME)
+    _processor = AutoImageProcessor.from_pretrained(LAYOUT_MODEL_NAME)
     _model = AutoModelForObjectDetection.from_pretrained(LAYOUT_MODEL_NAME)
     if torch.cuda.is_available():
         _model.to("cuda")

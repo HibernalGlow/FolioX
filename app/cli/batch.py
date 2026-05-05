@@ -14,6 +14,8 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+import sys
+
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -25,12 +27,17 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
-from ..config import logger, OLLAMA_BASE, OLLAMA_MODEL
+from ..config import logger, OLLAMA_BASE, OLLAMA_MODEL, BATCH_CONFIG
 from ..database import init_db
 from ..ocr.engine import ocr_image_with_layout, ocr_whole_image
 from ..layout import detect_layout
 
-console = Console()
+# Force UTF-8 on Windows to avoid GBK encoding errors
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+console = Console(force_terminal=True)
 
 # --- Constants ---
 ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
@@ -116,17 +123,27 @@ def pdf_to_page_images(pdf_path: Path, tmp_dir: Path) -> list[Path]:
     return images
 
 
-def collect_files(input_dir: Path, ext_filter: set[str], include_images: bool) -> list[Path]:
+def collect_files(input_dir: Path, ext_filter: set[str], include_images: bool,
+                  blacklist: list[str] | None = None) -> tuple[list[Path], int]:
+    """Collect files matching ext_filter, skipping folders with blacklisted names.
+    Returns (matched_files, skipped_by_blacklist_count).
+    """
+    bl = blacklist or BATCH_CONFIG.get("blacklist", [])
     files = []
+    skipped = 0
     for p in sorted(input_dir.rglob("*")):
         if not p.is_file():
+            continue
+        # Skip if any parent folder name contains a blacklisted keyword
+        if bl and any(kw in part for part in p.relative_to(input_dir).parts for kw in bl):
+            skipped += 1
             continue
         suffix = p.suffix.lower()
         if suffix in ext_filter:
             files.append(p)
         elif include_images and suffix in IMAGE_EXTS:
             files.append(p)
-    return files
+    return files, skipped
 
 
 # --- OCR processing ---
@@ -220,11 +237,16 @@ async def process_document(source_path: Path, use_layout: bool = True) -> dict:
 # --- File preview table ---
 
 def show_file_preview(input_dir: Path, ext_filter: set[str], include_images: bool,
-                      existing_sources: set[str], existing_hashes: set[str]) -> list[Path]:
+                      existing_sources: set[str], existing_hashes: set[str],
+                      blacklist: list[str] | None = None) -> list[Path]:
     """Show a rich table of files to be processed, return the todo list."""
-    all_files = collect_files(input_dir, ext_filter, include_images)
+    all_files, skipped = collect_files(input_dir, ext_filter, include_images, blacklist=blacklist)
     if not all_files:
-        console.print("[yellow]No matching files found.[/]")
+        if skipped:
+            console.print(f"[yellow]No matching files found.[/] [dim]({skipped} skipped by blacklist)[/]")
+        else:
+            console.print("[yellow]No matching files found.[/]")
+        return []
         return []
 
     # Determine which are already processed
@@ -259,7 +281,22 @@ def show_file_preview(input_dir: Path, ext_filter: set[str], include_images: boo
     console.print(table)
     if done:
         console.print(f"  [green]✓ {len(done)} already processed[/]  [cyan]○ {len(todo)} pending[/]")
+    if skipped:
+        console.print(f"  [dim]✗ {skipped} skipped by blacklist[/]")
     return todo
+
+
+# --- Text preview helper ---
+
+def _text_preview(result: dict, max_len: int = 40) -> str:
+    """Extract a short text preview from an OCR result."""
+    text = ""
+    for page in result.get("pages", []):
+        text += page.get("text", "")
+    text = text.strip().replace("\n", " ")
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text if text else ""
 
 
 # --- Main batch command ---
@@ -276,12 +313,14 @@ async def _run_batch(
     from app.ocr import engine as ocr_engine
     ocr_engine.http_client = httpx.AsyncClient(timeout=300.0)
 
-    # Pre-load layout model
+    # Pre-load layout model (only when enabled)
     if use_layout:
         with console.status("[bold cyan]Loading layout model...[/]"):
-            from app.layout.model import get_model
-            get_model()
+            from app.layout.model import ensure_model
+            ensure_model()
         console.print("[green]✓ Layout model loaded[/]")
+    else:
+        console.print("[dim]Layout detection: OFF (faster mode)[/]")
 
     # Check Ollama
     from app.ocr.engine import check_ollama
@@ -319,12 +358,15 @@ async def _run_batch(
         async with semaphore:
             result = await process_document(f, use_layout=use_layout)
             results.append(result)
+            chars = result.get("total_chars", 0)
             if result.get("error"):
                 total_errors += 1
                 progress.update(task_id, advance=1, description=f"[red]✗[/] {f.name}")
             else:
-                total_chars += result.get("total_chars", 0)
-                progress.update(task_id, advance=1, description=f"[green]✓[/] {f.name}")
+                total_chars += chars
+                # Show brief text preview
+                preview = _text_preview(result)
+                progress.update(task_id, advance=1, description=f"[green]✓[/] {f.name} [{chars}c] {preview}")
             # Intermediate save
             try:
                 with open(output_path, "w", encoding="utf-8") as fp:
@@ -361,10 +403,17 @@ def run_batch_cmd(
     no_layout: bool,
     concurrency: int,
     incremental: bool,
+    blacklist: Optional[list[str]] = None,
+    yes: bool = False,
 ):
     """Typer callback for `folio batch`."""
     # Init DB
     init_db()
+
+    # Merge blacklist from CLI args and config
+    bl = blacklist if blacklist is not None else BATCH_CONFIG.get("blacklist", [])
+    if bl:
+        console.print(f"[dim]Blacklist keywords: {', '.join(bl)}[/]")
 
     # Interactive path prompt if not provided
     if not path:
@@ -408,17 +457,19 @@ def run_batch_cmd(
         existing_results, existing_sources, existing_hashes = load_existing_results(output_path)
 
     # Show file preview
-    todo = show_file_preview(input_dir, ext_filter, images, existing_sources, existing_hashes)
+    todo = show_file_preview(input_dir, ext_filter, images, existing_sources, existing_hashes,
+                             blacklist=bl)
     if not todo:
         console.print("[green]All files already processed ✓[/]")
         return
 
     # Confirm
     console.print(f"\n[bold]Will process {len(todo)} file(s)[/]  →  [dim]{output_path}[/]")
-    from rich.prompt import Confirm
-    if not Confirm.ask("Proceed?", default=True):
-        console.print("[dim]Cancelled.[/]")
-        return
+    if not yes:
+        from rich.prompt import Confirm
+        if not Confirm.ask("Proceed?", default=True):
+            console.print("[dim]Cancelled.[/]")
+            return
 
     # Run
     asyncio.run(_run_batch(

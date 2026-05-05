@@ -1,0 +1,22 @@
+# Folio-OCR configuration file
+# Place in project root or set FOLIO_CONFIG env var to override path
+
+[batch]
+# Blacklist keywords: folders whose name contains any of these keywords will be skipped
+# Useful for skipping image-only galleries that have no text to OCR
+blacklist = ["画集"]
+
+# Default file extensions to process
+ext = [".zip", ".rar", ".7z", ".tar", ".gz", ".pdf"]
+
+# Also process standalone image files
+include_images = false
+
+# Skip layout detection (faster, recommended for batch)
+no_layout = false
+
+# Maximum concurrent OCR tasks
+concurrency = 4
+
+# Incremental mode by default
+incremental = true

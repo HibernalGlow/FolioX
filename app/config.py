@@ -1,12 +1,39 @@
 # -*- coding: utf-8 -*-
 """Application configuration — all constants in one place."""
-import os
 import json
 import logging
+import os
+import sys
 from pathlib import Path
 
 # Application root directory (compatible with PyInstaller frozen mode)
 APP_ROOT = Path(os.environ.get("FOLIO_APP_ROOT", Path(__file__).resolve().parent.parent))
+
+# --- Load folio.toml config ---
+_CONFIG_FILE = Path(os.environ.get("FOLIO_CONFIG", APP_ROOT / "folio.toml"))
+
+
+def _load_toml_config() -> dict:
+    """Load folio.toml if it exists, return parsed dict."""
+    if not _CONFIG_FILE.exists():
+        return {}
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            try:
+                import tomllib
+            except ImportError:
+                import tomli as tomllib  # type: ignore[no-redef]
+        with open(_CONFIG_FILE, "rb") as f:
+            return tomllib.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load config {_CONFIG_FILE}: {e}")
+        return {}
+
+
+TOML_CONFIG = _load_toml_config()
+BATCH_CONFIG = TOML_CONFIG.get("batch", {})
 
 # Frontend directory: prefer Svelte build output, fallback to legacy files
 FRONTEND_DIR = APP_ROOT / "dist-frontend"
