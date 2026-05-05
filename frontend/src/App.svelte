@@ -8,23 +8,30 @@
   import OcrResult from './components/OcrResult.svelte';
   import ProgressBar from './components/ProgressBar.svelte';
   import ToastContainer from './components/ToastContainer.svelte';
-  import { activeDocId } from '$lib/stores';
+  import BatchPanel from './components/BatchPanel.svelte';
+  import { activeDocId, batchActive } from '$lib/stores';
 
   let rightPanelWidth = $state(480);
   let showDoc = $derived($activeDocId !== null);
+  let showBatch = $derived($batchActive || showBatchPanel);
+  let showBatchPanel = $state(false);
 </script>
 
 <div class="flex h-screen flex-col overflow-hidden">
   <!-- Top Bar -->
-  <TopBar />
+  <TopBar bind:showBatchPanel={showBatchPanel} />
 
   <!-- Progress Bar -->
   <ProgressBar />
 
   <!-- Main 3-Column Layout -->
   <div class="flex flex-1 overflow-hidden">
-    <!-- Left: Doc List + Page List -->
-    {#if showDoc}
+    <!-- Left: Doc List + Page List OR Batch Panel -->
+    {#if showBatch}
+      <div class="flex w-[280px] flex-shrink-0 flex-col border-r border-warm-gray bg-white">
+        <BatchPanel />
+      </div>
+    {:else if showDoc}
       <div class="flex w-[200px] flex-shrink-0 flex-col border-r border-warm-gray bg-white">
         <DocList />
         <div class="h-px bg-warm-gray"></div>

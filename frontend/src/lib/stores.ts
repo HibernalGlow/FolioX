@@ -58,3 +58,14 @@ export function resetViewState() {
   searchMatches.set([]);
   searchIdx.set(-1);
 }
+
+// --- Batch OCR state ---
+export const batchActive = writable(false);
+export const batchId = writable<string | null>(null);
+export const batchStatus = writable<'idle' | 'running' | 'completed' | 'cancelled' | 'error'>('idle');
+export const batchTotal = writable(0);
+export const batchDone = writable(0);
+export const batchCurrent = writable('');
+export const batchElapsed = writable(0);
+export const batchResults = writable<any[]>([]);
+export const batchOutputPath = writable('');

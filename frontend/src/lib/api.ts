@@ -96,3 +96,60 @@ export function downloadBlob(blob: Blob, filename: string) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// --- Batch OCR API ---
+
+export interface BrowseResult {
+  path: string;
+  parent: string;
+  subdirs: { name: string; path: string }[];
+  archives: { name: string; size_mb: number; path: string }[];
+  pdfs: { name: string; size_mb: number; path: string }[];
+  images: { name: string; size_mb: number; path: string }[];
+  total_files: number;
+}
+
+export interface BatchStartResult {
+  batch_id: string;
+  total: number;
+  skipped: number;
+}
+
+export async function browseDirectory(path: string): Promise<BrowseResult> {
+  const res = await fetchT(`/api/batch/browse?path=${encodeURIComponent(path)}`, {}, 10000);
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || 'Browse failed');
+  }
+  return res.json();
+}
+
+export async function startBatch(
+  path: string,
+  ext = '.zip,.rar,.7z,.tar,.gz,.pdf',
+  images = false,
+  layout = true,
+  incremental = false,
+): Promise<BatchStartResult> {
+  const params = new URLSearchParams({
+    path,
+    ext,
+    images: String(images),
+    layout: String(layout),
+    incremental: String(incremental),
+  });
+  const res = await fetchT(`/api/batch/start?${params}`, { method: 'POST' }, 300000);
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || 'Batch start failed');
+  }
+  return res.json();
+}
+
+export function batchProgressUrl(batchId: string): string {
+  return `/api/batch/${batchId}/progress`;
+}
+
+export async function cancelBatch(batchId: string): Promise<void> {
+  await fetchT(`/api/batch/${batchId}/cancel`, { method: 'POST' }, 10000);
+}

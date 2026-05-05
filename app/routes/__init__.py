@@ -7,6 +7,7 @@ from .upload import router as upload_router
 from .ocr import router as ocr_router
 from .documents import router as documents_router
 from .export import router as export_router
+from .batch import router as batch_router
 
 # Collect all routers for app inclusion
 all_routers = [
@@ -15,4 +16,5 @@ all_routers = [
     ocr_router,
     documents_router,
     export_router,
+    batch_router,
 ]
