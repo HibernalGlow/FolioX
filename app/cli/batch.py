@@ -44,11 +44,38 @@ PDF_EXT = ".pdf"
 
 # --- Retry helper ---
 
-async def _ocr_with_retry(coro_fn, *args, max_retries: int = 3, base_delay: float = 2.0, **kwargs):
-    """Call an async OCR function with retry on 5xx / connection errors."""
+class GlobalBackoff:
+    """When any worker hits a 5xx error, pause all workers to let the server recover."""
+    def __init__(self, cooldown: float = 10.0):
+        self._event = asyncio.Event()
+        self._event.set()  # initially unblocked
+        self._cooldown = cooldown
+        self._cooldown_until = 0.0  # monotonic time when cooldown ends
+
+    async def wait_if_cooling(self):
+        """Block until the cooldown period is over."""
+        now = time.monotonic()
+        if now < self._cooldown_until:
+            wait = self._cooldown_until - now
+            logger.info(f"[batch] Global cooldown — waiting {wait:.1f}s for server recovery...")
+            await asyncio.sleep(wait)
+
+    def trigger(self):
+        """Signal a 5xx error — all workers pause for cooldown."""
+        self._cooldown_until = time.monotonic() + self._cooldown
+
+
+async def _ocr_with_retry(coro_fn, *args, max_retries: int = 3, base_delay: float = 2.0,
+                          backoff: GlobalBackoff | None = None, **kwargs):
+    """Call an async OCR function with retry on 5xx / connection errors.
+    With global backoff: on 5xx, all workers pause to let server recover.
+    """
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
+            # Wait if global cooldown is active
+            if backoff:
+                await backoff.wait_if_cooling()
             return await coro_fn(*args, **kwargs)
         except Exception as e:
             last_err = e
@@ -57,6 +84,9 @@ async def _ocr_with_retry(coro_fn, *args, max_retries: int = 3, base_delay: floa
             is_retryable = "500" in err_str or "502" in err_str or "503" in err_str or "ConnectError" in err_str or "ConnectionReset" in err_str
             if not is_retryable or attempt == max_retries:
                 raise
+            # Trigger global cooldown on 5xx so all workers back off
+            if backoff and is_retryable:
+                backoff.trigger()
             delay = base_delay * attempt
             logger.warning(f"[batch] Retry {attempt}/{max_retries} after error: {err_str[:80]}... (wait {delay:.0f}s)")
             await asyncio.sleep(delay)
@@ -251,7 +281,8 @@ def collect_files(input_dir: Path, ext_filter: set[str], include_images: bool,
 
 # --- OCR processing (page-by-page generator) ---
 
-async def process_document_pages(source_path: Path, use_layout: bool = True):
+async def process_document_pages(source_path: Path, use_layout: bool = True,
+                                 backoff: GlobalBackoff | None = None):
     """Yield (event_type, data) for each page processed.
     
     Events:
@@ -318,11 +349,11 @@ async def process_document_pages(source_path: Path, use_layout: bool = True):
             page_data = {"page": i + 1, "source": img_path.name, "text": "", "regions": [], "time": 0, "error": None}
             try:
                 if use_layout:
-                    text, regions = await _ocr_with_retry(ocr_image_with_layout, str(img_path), merge=True)
+                    text, regions = await _ocr_with_retry(ocr_image_with_layout, str(img_path), merge=True, backoff=backoff)
                 else:
                     from PIL import Image as PILImage
                     img = PILImage.open(str(img_path)).convert("RGB")
-                    text = await _ocr_with_retry(ocr_whole_image, img)
+                    text = await _ocr_with_retry(ocr_whole_image, img, backoff=backoff)
                     img.close()
                     regions = []
                 page_data["text"] = text
@@ -432,6 +463,9 @@ async def _run_batch(
     from app.ocr import engine as ocr_engine
     ocr_engine.http_client = httpx.AsyncClient(timeout=300.0)
 
+    # Global backoff for 5xx errors
+    backoff = GlobalBackoff(cooldown=10.0)
+
     # Pre-load layout model (only when enabled)
     if use_layout:
         with console.status("[bold cyan]Loading layout model...[/]"):
@@ -480,6 +514,11 @@ async def _run_batch(
         """Build the full live display: progress + recent text."""
         # Show last 8 text lines
         recent = text_lines[-8:] if text_lines else []
+        # Show cooldown status
+        now = time.monotonic()
+        remaining = backoff._cooldown_until - now
+        if remaining > 0:
+            recent.append(f"[yellow]⏳ Server cooling down... {remaining:.0f}s remaining[/]")
         body = progress.get_renderable()
         if recent:
             lines_text = "\n".join(recent)
@@ -494,7 +533,7 @@ async def _run_batch(
         async with semaphore:
             progress.update(task_id, description=str(f))
             result_dict = None
-            async for event_type, data in process_document_pages(f, use_layout=use_layout):
+            async for event_type, data in process_document_pages(f, use_layout=use_layout, backoff=backoff):
                 if event_type == "page":
                     pg = data
                     pg_num = pg.get("page", "?")
