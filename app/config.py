@@ -60,10 +60,17 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # --- Database ---
 DB_PATH = Path(os.environ.get("DB_PATH", APP_ROOT / "folio_ocr.db"))
 
+# --- OCR Backend ---
+# Supported: "ollama", "umiocr"
+OCR_BACKEND = os.environ.get("OCR_BACKEND", BATCH_CONFIG.get("backend", "ollama"))
+
 # --- Ollama ---
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "glm-ocr")
 OCR_PROMPT = "识别图片中的全部内容，输出Markdown格式。跳过页眉页脚和页码。"
+
+# --- UmiOCR ---
+UMIOCR_BASE = os.environ.get("UMIOCR_BASE", BATCH_CONFIG.get("umiocr", {}).get("base", "http://127.0.0.1:1224"))
 
 # --- OCR image limits ---
 OCR_MAX_LONG_SIDE = 1280  # resize so longest edge <= this before sending to Ollama

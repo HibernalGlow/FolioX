@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""OCR engine — image encoding, Ollama API calls, and orchestration."""
+"""OCR engine — unified dispatch layer supporting multiple backends.
+
+Supported backends:
+  - "ollama":  Ollama HTTP API (VLM-based OCR, e.g. glm-ocr)
+  - "umiocr":  Umi-OCR local HTTP service (PaddleOCR-based, fast & stable)
+
+Dispatch is controlled by OCR_BACKEND config (from folio.toml or env var).
+"""
 import asyncio
 import base64
 import io
@@ -10,6 +17,7 @@ from PIL import Image
 from ..config import (
     logger, OLLAMA_BASE, OLLAMA_MODEL, OCR_PROMPT,
     OCR_MAX_LONG_SIDE, MAX_IMAGE_HEIGHT, SEGMENT_OVERLAP,
+    OCR_BACKEND, UMIOCR_BASE,
 )
 from ..layout import detect_layout
 from ..layout.columns import merge_adjacent_regions, group_bbox, dedup_regions
@@ -19,9 +27,13 @@ from .postprocess import postprocess
 http_client: httpx.AsyncClient | None = None
 
 
-def image_to_b64(img: Image.Image) -> str:
-    """Convert PIL Image to base64 string for Ollama OCR.
-    Uses WebP encoding (quality=90) for smallest payload with full OCR quality.
+# ---------------------------------------------------------------------------
+# Image encoding utilities
+# ---------------------------------------------------------------------------
+
+def image_to_b64(img: Image.Image, fmt: str = "WEBP", quality: int = 90) -> str:
+    """Convert PIL Image to base64 string.
+    Uses WebP encoding (quality=90) by default for smallest payload.
     Automatically downscales if the image longest side exceeds OCR_MAX_LONG_SIDE.
     """
     w, h = img.size
@@ -35,11 +47,15 @@ def image_to_b64(img: Image.Image) -> str:
         img = img.convert("RGB")
 
     buf = io.BytesIO()
-    img.save(buf, format="WEBP", quality=90)
+    img.save(buf, format=fmt, quality=quality)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-async def ocr_single(image_b64: str) -> str:
+# ---------------------------------------------------------------------------
+# Backend: Ollama
+# ---------------------------------------------------------------------------
+
+async def _ocr_single_ollama(image_b64: str) -> str:
     """Send a single image to Ollama for OCR."""
     resp = await http_client.post(
         f"{OLLAMA_BASE}/api/chat",
@@ -60,6 +76,52 @@ async def ocr_single(image_b64: str) -> str:
     return result.get("message", {}).get("content", "")
 
 
+# ---------------------------------------------------------------------------
+# Backend: UmiOCR
+# ---------------------------------------------------------------------------
+
+async def _ocr_single_umiocr(image_b64: str) -> str:
+    """Send a single image to UmiOCR for OCR. Returns plain text."""
+    payload = {
+        "base64": image_b64,
+        "options": {
+            "data.format": "text",
+            "tbpu.parser": "multi_para",
+        },
+    }
+    resp = await http_client.post(
+        f"{UMIOCR_BASE}/api/ocr",
+        json=payload,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+
+    code = result.get("code", -1)
+    if code == 100:
+        return result.get("data", "")
+    elif code == 101:
+        return ""
+    else:
+        err_msg = result.get("data", "unknown error") if isinstance(result.get("data"), str) else str(result.get("data"))
+        raise RuntimeError(f"UmiOCR error (code={code}): {err_msg}")
+
+
+# ---------------------------------------------------------------------------
+# Unified dispatch
+# ---------------------------------------------------------------------------
+
+async def ocr_single(image_b64: str) -> str:
+    """Send a single image to the configured OCR backend."""
+    if OCR_BACKEND == "umiocr":
+        return await _ocr_single_umiocr(image_b64)
+    else:
+        return await _ocr_single_ollama(image_b64)
+
+
+# ---------------------------------------------------------------------------
+# Image splitting (for tall images)
+# ---------------------------------------------------------------------------
+
 def _split_image(img: Image.Image) -> list[Image.Image]:
     """Split a tall image into overlapping segments."""
     w, h = img.size
@@ -76,6 +138,10 @@ def _split_image(img: Image.Image) -> list[Image.Image]:
     return segments
 
 
+# ---------------------------------------------------------------------------
+# High-level OCR functions
+# ---------------------------------------------------------------------------
+
 async def ocr_whole_image(img: Image.Image) -> str:
     """Fallback: OCR whole image, with splitting for tall images."""
     w, h = img.size
@@ -84,7 +150,10 @@ async def ocr_whole_image(img: Image.Image) -> str:
     else:
         segments = [img]
 
-    seg_b64s = [image_to_b64(seg) for seg in segments]
+    # UmiOCR prefers PNG, Ollama prefers WebP
+    fmt = "PNG" if OCR_BACKEND == "umiocr" else "WEBP"
+    quality = 95 if fmt == "PNG" else 90
+    seg_b64s = [image_to_b64(seg, fmt=fmt, quality=quality) for seg in segments]
     results = await asyncio.gather(*[ocr_single(b64) for b64 in seg_b64s])
     all_text = []
     for text in results:
@@ -115,6 +184,10 @@ async def ocr_image_with_layout(image_path: str, merge: bool = True) -> tuple[st
         logger.info(f"[OCR] TOTAL (fallback): {elapsed:.2f}s")
         return text, []
 
+    # UmiOCR prefers PNG, Ollama prefers WebP
+    fmt = "PNG" if OCR_BACKEND == "umiocr" else "WEBP"
+    quality = 95 if fmt == "PNG" else 90
+
     regions = []
 
     if merge:
@@ -125,7 +198,7 @@ async def ocr_image_with_layout(image_path: str, merge: bool = True) -> tuple[st
         for gi, group in enumerate(groups):
             bbox = group_bbox(group)
             cropped = img.crop(bbox)
-            seg_b64 = image_to_b64(cropped)
+            seg_b64 = image_to_b64(cropped, fmt=fmt, quality=quality)
             label = group[0]["label"] if len(group) == 1 else "text"
             group_crops.append((gi, group, bbox, seg_b64, label))
 
@@ -151,7 +224,7 @@ async def ocr_image_with_layout(image_path: str, merge: bool = True) -> tuple[st
         for i, region in enumerate(raw_regions):
             bbox = region["bbox"]
             cropped = img.crop(bbox)
-            seg_b64 = image_to_b64(cropped)
+            seg_b64 = image_to_b64(cropped, fmt=fmt, quality=quality)
             region_crops.append((i, region, bbox, seg_b64))
 
         async def _ocr_region(i, region, bbox, seg_b64):
@@ -181,6 +254,10 @@ async def ocr_image_with_layout(image_path: str, merge: bool = True) -> tuple[st
     return combined, regions
 
 
+# ---------------------------------------------------------------------------
+# Status checks
+# ---------------------------------------------------------------------------
+
 async def check_ollama() -> dict:
     """Check Ollama status and model availability."""
     try:
@@ -192,6 +269,24 @@ async def check_ollama() -> dict:
         return {"online": True, "model_loaded": has_model, "models": models}
     except Exception:
         return {"online": False, "model_loaded": False, "models": []}
+
+
+async def check_umiocr() -> dict:
+    """Check UmiOCR service status."""
+    try:
+        resp = await http_client.get(f"{UMIOCR_BASE}/api/ocr/get_options", timeout=5.0)
+        resp.raise_for_status()
+        return {"online": True}
+    except Exception:
+        return {"online": False}
+
+
+async def check_backend() -> dict:
+    """Check the configured OCR backend status."""
+    if OCR_BACKEND == "umiocr":
+        return {"backend": "umiocr", **(await check_umiocr())}
+    else:
+        return {"backend": "ollama", **(await check_ollama())}
 
 
 # Import here to avoid circular dependency

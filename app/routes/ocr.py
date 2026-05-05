@@ -60,7 +60,7 @@ async def ocr_single_page(doc_id: str, page_num: int, layout: bool = Query(True)
         }
     except httpx.HTTPStatusError as e:
         detail = e.response.text
-        logger.error(f"[OCR] Ollama error: {detail}", exc_info=True)
+        logger.error(f"[OCR] Backend error: {detail}", exc_info=True)
         raise HTTPException(500, f"OCR failed: {detail}")
     except Exception as e:
         logger.error(f"[OCR] Error: {e}", exc_info=True)

@@ -52,13 +52,17 @@ async def _ocr_single(file_path: Path, use_layout: bool) -> dict:
                 from app.layout.model import get_model
                 get_model()
 
-        # Check Ollama
-        from app.ocr.engine import check_ollama, OLLAMA_BASE, OLLAMA_MODEL
-        status = await check_ollama()
-        if not status["online"]:
-            console.print(f"[red]✗ Ollama not online at {OLLAMA_BASE}[/]")
+        # Check OCR backend
+        from app.ocr.engine import check_backend
+        from app.config import OCR_BACKEND, OLLAMA_BASE, OLLAMA_MODEL, UMIOCR_BASE
+        status = await check_backend()
+        if not status.get("online"):
+            if OCR_BACKEND == "umiocr":
+                console.print(f"[red]✗ UmiOCR not online at {UMIOCR_BASE}[/]")
+            else:
+                console.print(f"[red]✗ Ollama not online at {OLLAMA_BASE}[/]")
             return None
-        if not status["model_loaded"]:
+        if OCR_BACKEND == "ollama" and not status.get("model_loaded"):
             console.print(f"[red]✗ Model '{OLLAMA_MODEL}' not found[/]")
             return None
 

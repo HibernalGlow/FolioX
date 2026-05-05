@@ -6,6 +6,8 @@ from .engine import (
     ocr_single,
     image_to_b64,
     check_ollama,
+    check_umiocr,
+    check_backend,
     http_client,
 )
 from .postprocess import postprocess

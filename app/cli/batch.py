@@ -25,9 +25,9 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
-from ..config import logger, OLLAMA_BASE, OLLAMA_MODEL, BATCH_CONFIG
+from ..config import logger, OLLAMA_BASE, OLLAMA_MODEL, BATCH_CONFIG, OCR_BACKEND, UMIOCR_BASE
 from ..database import init_db
-from ..ocr.engine import ocr_image_with_layout, ocr_whole_image
+from ..ocr.engine import ocr_image_with_layout, ocr_whole_image, check_backend
 from ..layout import detect_layout
 
 # Force UTF-8 on Windows to avoid GBK encoding errors
@@ -475,18 +475,24 @@ async def _run_batch(
     else:
         console.print("[dim]Layout detection: OFF (faster mode)[/]")
 
-    # Check Ollama
-    from app.ocr.engine import check_ollama
-    status = await check_ollama()
-    if not status["online"]:
-        console.print(f"[red]✗ Ollama not online at {OLLAMA_BASE}[/]")
+    # Check OCR backend
+    backend_status = await check_backend()
+    backend_name = backend_status.get("backend", OCR_BACKEND)
+    if not backend_status.get("online"):
+        if backend_name == "umiocr":
+            console.print(f"[red]✗ UmiOCR not online at {UMIOCR_BASE}[/]")
+        else:
+            console.print(f"[red]✗ Ollama not online at {OLLAMA_BASE}[/]")
         await ocr_engine.http_client.aclose()
         return False
-    if not status["model_loaded"]:
-        console.print(f"[red]✗ Model '{OLLAMA_MODEL}' not found. Available: {status['models']}[/]")
+    if backend_name == "ollama" and not backend_status.get("model_loaded"):
+        console.print(f"[red]✗ Model '{OLLAMA_MODEL}' not found. Available: {backend_status.get('models', [])}[/]")
         await ocr_engine.http_client.aclose()
         return False
-    console.print(f"[green]✓ Ollama ready, model: {OLLAMA_MODEL}[/]")
+    if backend_name == "umiocr":
+        console.print(f"[green]✓ UmiOCR ready at {UMIOCR_BASE}[/]")
+    else:
+        console.print(f"[green]✓ Ollama ready, model: {OLLAMA_MODEL}[/]")
 
     # --- Rich layout: progress bar on top, text log below ---
     progress = Progress(

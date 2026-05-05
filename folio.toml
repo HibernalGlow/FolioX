@@ -16,8 +16,15 @@ include_images = false
 no_layout = true
 
 # Maximum concurrent OCR tasks
-concurrency = 4
+concurrency = 1
 
 # Incremental mode by default
 incremental = true
+
+# OCR backend: "ollama" or "umiocr"
+backend = "umiocr"
+
+[umiocr]
+# UmiOCR HTTP service address
+base = "http://127.0.0.1:1224"
                                         

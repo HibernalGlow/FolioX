@@ -6,9 +6,9 @@ import subprocess
 
 from fastapi import APIRouter, HTTPException
 
-from ..config import logger, OLLAMA_BASE, OLLAMA_MODEL, FRONTEND_DIR
+from ..config import logger, OLLAMA_BASE, OLLAMA_MODEL, FRONTEND_DIR, OCR_BACKEND, UMIOCR_BASE
 from ..layout.model import ensure_model, is_loaded as layout_is_loaded
-from ..ocr.engine import check_ollama, http_client
+from ..ocr.engine import check_ollama, check_umiocr, check_backend, http_client
 
 router = APIRouter()
 
@@ -25,14 +25,25 @@ async def root():
 @router.get("/api/status")
 async def status():
     """Check service status."""
-    ollama = await check_ollama()
-    return {
+    backend_status = await check_backend()
+    backend_name = backend_status.get("backend", OCR_BACKEND)
+
+    result = {
         "status": "running",
-        "model_loaded": ollama["model_loaded"],
+        "backend": backend_name,
         "layout_loaded": layout_is_loaded(),
-        "device": "ollama",
-        "gpu": {"name": f"Ollama ({OLLAMA_MODEL})"} if ollama["online"] else None,
     }
+
+    if backend_name == "umiocr":
+        result["model_loaded"] = backend_status["online"]
+        result["device"] = "umiocr"
+        result["gpu"] = {"name": "UmiOCR"} if backend_status["online"] else None
+    else:
+        result["model_loaded"] = backend_status.get("model_loaded", False)
+        result["device"] = "ollama"
+        result["gpu"] = {"name": f"Ollama ({OLLAMA_MODEL})"} if backend_status["online"] else None
+
+    return result
 
 
 async def _ensure_ollama_running() -> dict:
@@ -69,12 +80,20 @@ async def _ensure_ollama_running() -> dict:
 
 @router.post("/api/load-model")
 async def load_model_endpoint():
-    """Load layout model + start Ollama + pre-warm OCR model."""
+    """Load layout model + start OCR backend + pre-warm OCR model."""
     import time
 
     if not layout_is_loaded():
         await asyncio.to_thread(ensure_model)
 
+    if OCR_BACKEND == "umiocr":
+        # UmiOCR: just check it's online
+        status = await check_umiocr()
+        if not status["online"]:
+            raise HTTPException(500, f"UmiOCR not online at {UMIOCR_BASE}. Please start Umi-OCR first.")
+        return {"success": True, "message": "All models loaded (UmiOCR backend)"}
+
+    # Ollama backend
     ollama = await _ensure_ollama_running()
 
     if not ollama["model_loaded"]:
