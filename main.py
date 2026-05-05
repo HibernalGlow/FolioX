@@ -86,7 +86,7 @@ def build_frontend_if_needed():
 def start_server(port: int):
     """在子线程中启动 FastAPI 服务"""
     import uvicorn
-    from server import app
+    from app import app
 
     logger.info(f"Starting FastAPI on 127.0.0.1:{port}")
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
