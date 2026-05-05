@@ -213,7 +213,6 @@ async def check_ollama() -> dict:
 
 # OCR image size limits (glm-ocr F16 crashes on large images; 1280px balances speed & accuracy)
 OCR_MAX_LONG_SIDE = 1280  # resize so longest edge ≤ this before sending to Ollama
-OCR_MAX_PNG_BYTES = 1.5 * 1024 * 1024  # 1.5MB hard cap to avoid GGML assert
 # Max image height for single OCR call (fallback when layout detection returns nothing)
 MAX_IMAGE_HEIGHT = 1600
 SEGMENT_OVERLAP = 80
@@ -548,14 +547,26 @@ async def ocr_image_with_layout(image_path: str, merge: bool = True) -> tuple[st
         groups = _merge_adjacent_regions(raw_regions)
         logger.info(f"[OCR] Merged {len(raw_regions)} regions into {len(groups)} groups")
 
+        # Prepare all crops + b64 concurrently, then OCR in parallel
+        group_crops = []
         for gi, group in enumerate(groups):
             bbox = _group_bbox(group)
             cropped = img.crop(bbox)
             seg_b64 = _image_to_b64(cropped)
+            label = group[0]["label"] if len(group) == 1 else "text"
+            group_crops.append((gi, group, bbox, seg_b64, label))
+
+        # Concurrent OCR for all groups
+        async def _ocr_group(gi, group, bbox, seg_b64, label):
             text = await _ocr_single(seg_b64)
             text = _postprocess(text)
+            return gi, group, bbox, label, text
 
-            label = group[0]["label"] if len(group) == 1 else "text"
+        results = await asyncio.gather(*[
+            _ocr_group(gi, group, bbox, seg_b64, label)
+            for gi, group, bbox, seg_b64, label in group_crops
+        ])
+        for gi, group, bbox, label, text in results:
             regions.append({
                 "idx": gi,
                 "label": label,
@@ -564,14 +575,24 @@ async def ocr_image_with_layout(image_path: str, merge: bool = True) -> tuple[st
             })
             logger.info(f"[OCR] Group {gi+1}/{len(groups)} ({label}, {len(group)} merged): {len(text)} chars")
     else:
-        # Fine-grained path: OCR each region individually
+        # Fine-grained path: OCR each region individually (concurrent)
+        region_crops = []
         for i, region in enumerate(raw_regions):
             bbox = region["bbox"]
             cropped = img.crop(bbox)
             seg_b64 = _image_to_b64(cropped)
+            region_crops.append((i, region, bbox, seg_b64))
+
+        async def _ocr_region(i, region, bbox, seg_b64):
             text = await _ocr_single(seg_b64)
             text = _postprocess(text)
+            return i, region, bbox, text
 
+        results = await asyncio.gather(*[
+            _ocr_region(i, region, bbox, seg_b64)
+            for i, region, bbox, seg_b64 in region_crops
+        ])
+        for i, region, bbox, text in results:
             regions.append({
                 "idx": i,
                 "label": region["label"],
@@ -599,10 +620,11 @@ async def _ocr_whole_image(img: Image.Image) -> str:
     else:
         segments = [img]
 
+    # Concurrent OCR for all segments
+    seg_b64s = [_image_to_b64(seg) for seg in segments]
+    results = await asyncio.gather(*[_ocr_single(b64) for b64 in seg_b64s])
     all_text = []
-    for seg in segments:
-        seg_b64 = _image_to_b64(seg)
-        text = await _ocr_single(seg_b64)
+    for text in results:
         text = _postprocess(text)
         if text:
             all_text.append(text)
@@ -626,13 +648,12 @@ def _split_image(img: Image.Image) -> list[Image.Image]:
 
 
 def _image_to_b64(img: Image.Image) -> str:
-    """Convert PIL Image to base64 PNG string.
+    """Convert PIL Image to base64 string for Ollama OCR.
 
-    Automatically downscales if the image is too large for glm-ocr:
-    1. Resize so longest side ≤ OCR_MAX_LONG_SIDE (1280px by default)
-    2. If PNG still exceeds OCR_MAX_PNG_BYTES, shrink further
+    Uses WebP encoding (quality=90) for smallest payload with full OCR quality.
+    Automatically downscales if the image longest side exceeds OCR_MAX_LONG_SIDE.
     """
-    # Step 1: cap longest side
+    # Cap longest side
     w, h = img.size
     long_side = max(w, h)
     if long_side > OCR_MAX_LONG_SIDE:
@@ -640,25 +661,14 @@ def _image_to_b64(img: Image.Image) -> str:
         nw, nh = int(w * ratio), int(h * ratio)
         img = img.resize((nw, nh), Image.LANCZOS)
 
-    # Convert mode
-    if img.mode in ("RGBA", "P"):
+    # Convert mode (WebP works best with RGB)
+    if img.mode != "RGB":
         img = img.convert("RGB")
 
-    # Step 2: check PNG size, shrink further if needed
+    # Encode as WebP (smallest payload, ~8-10x smaller than PNG)
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    png_bytes = buf.getvalue()
-
-    if len(png_bytes) > OCR_MAX_PNG_BYTES:
-        ratio = (OCR_MAX_PNG_BYTES / len(png_bytes)) ** 0.5
-        nw, nh = int(img.size[0] * ratio), int(img.size[1] * ratio)
-        img = img.resize((nw, nh), Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
-        logger.info(f"[OCR] Resized to {nw}x{nh} (PNG {len(png_bytes)//1024}KB) to stay under size limit")
-
-    return base64.b64encode(png_bytes).decode("utf-8")
+    img.save(buf, format="WEBP", quality=90)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 async def _ocr_single(image_b64: str) -> str:
@@ -1166,7 +1176,9 @@ async def ocr_all_pages(doc_id: str, layout: bool = Query(True)):
         ).fetchall()
 
     results = []
+    uncached = []  # (index_in_results, page_row)
 
+    # Separate cached and uncached pages
     for page in pages:
         if page["ocr_text"] is not None:
             results.append({
@@ -1176,8 +1188,12 @@ async def ocr_all_pages(doc_id: str, layout: bool = Query(True)):
                 "time": page["ocr_time"],
                 "cached": True,
             })
-            continue
+        else:
+            results.append(None)  # placeholder
+            uncached.append((len(results) - 1, page))
 
+    # Process uncached pages concurrently
+    async def _process_page(idx, page):
         image_path = _safe_doc_path(doc_id, page["filename"])
         try:
             t0 = time.time()
@@ -1190,22 +1206,29 @@ async def ocr_all_pages(doc_id: str, layout: bool = Query(True)):
                     (text, json.dumps(regions), elapsed, doc_id, page["num"]),
                 )
 
-            results.append({
+            return idx, {
                 "page_num": page["num"],
                 "text": text,
                 "regions": regions,
                 "time": elapsed,
                 "cached": False,
-            })
+            }
         except Exception as e:
             logger.error(f"[OCR] Page {page['num']} error: {e}", exc_info=True)
-            results.append({
+            return idx, {
                 "page_num": page["num"],
                 "text": None,
                 "regions": [],
                 "time": None,
                 "error": str(e),
-            })
+            }
+
+    if uncached:
+        page_results = await asyncio.gather(*[
+            _process_page(idx, page) for idx, page in uncached
+        ])
+        for idx, result in page_results:
+            results[idx] = result
 
     return {
         "doc_id": doc_id,
