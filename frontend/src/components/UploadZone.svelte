@@ -91,7 +91,7 @@
   function handleClick() {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.png,.jpg,.jpeg,.gif,.bmp,.pdf';
+    input.accept = '.png,.jpg,.jpeg,.gif,.bmp,.pdf,.webp,.avif,.jxl';
     input.multiple = true;
     input.onchange = () => {
       if (input.files) handleFiles(input.files);

@@ -26,6 +26,7 @@ from html.parser import HTMLParser
 from urllib.parse import quote
 import fitz  # PyMuPDF for PDF processing
 from PIL import Image
+import pillow_jxl  # JXL decode support
 import io
 from pydantic import BaseModel
 from docx import Document as DocxDocument
@@ -917,7 +918,7 @@ async def load_model_endpoint():
     return {"success": True, "message": "All models loaded"}
 
 
-ALLOWED_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.pdf'}
+ALLOWED_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.pdf', '.webp', '.avif', '.jxl'}
 
 
 @app.post("/api/upload")
@@ -1024,13 +1025,28 @@ async def upload_files(files: list[UploadFile] = File(...)):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+# MIME type mapping for image formats
+_MIME_MAP = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.bmp': 'image/bmp',
+    '.webp': 'image/webp',
+    '.avif': 'image/avif',
+    '.jxl': 'image/jxl',
+}
+
+
 @app.get("/api/images/{doc_id}/{filename}")
 async def get_image(doc_id: str, filename: str):
     """Serve an uploaded page image"""
     file_path = _safe_doc_path(doc_id, filename)
     if not file_path.exists():
         raise HTTPException(404, "Image not found")
-    return FileResponse(file_path, media_type="image/png")
+    suffix = file_path.suffix.lower()
+    media_type = _MIME_MAP.get(suffix, 'application/octet-stream')
+    return FileResponse(file_path, media_type=media_type)
 
 
 @app.post("/api/ocr/{doc_id}/{page_num}")
